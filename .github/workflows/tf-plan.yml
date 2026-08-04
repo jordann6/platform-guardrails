@@ -1,0 +1,113 @@
+name: Terraform Plan Guardrails (credentialed)
+
+# Reusable workflow for the gates that need a real cloud read: the plan itself,
+# the destroy guard, and the cost diff. Authenticates with OIDC only. If you are
+# passing a static access key into this, stop and fix that first.
+
+on:
+  workflow_call:
+    inputs:
+      terraform_dir:
+        type: string
+        default: terraform
+      terraform_version:
+        type: string
+        default: 1.11.3
+      aws_role_arn:
+        description: Role to assume via GitHub OIDC. Leave empty for non-AWS.
+        type: string
+        default: ""
+      aws_region:
+        type: string
+        default: us-east-2
+      environment:
+        description: GitHub environment to bind to (for required reviewers).
+        type: string
+        default: ""
+      enable_infracost:
+        description: Post a cost diff comment. Needs the INFRACOST_API_KEY secret.
+        type: boolean
+        default: false
+    secrets:
+      INFRACOST_API_KEY:
+        required: false
+
+permissions:
+  contents: read
+  id-token: write
+  pull-requests: write
+
+jobs:
+  plan:
+    name: Plan + destroy guard
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch guardrail scripts
+        uses: actions/checkout@v4
+        with:
+          repository: jordann6/platform-guardrails
+          path: .guardrails-src
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.aws_role_arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Plan
+        run: |
+          terraform -chdir=${{ inputs.terraform_dir }} init
+          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false
+          terraform -chdir=${{ inputs.terraform_dir }} show -json tfplan \
+            > "${{ inputs.terraform_dir }}/plan.json"
+
+      # The gate that stops a clean-looking apply from taking a database with it.
+      # Bypassed only by labelling the pull request 'destroy-approved'.
+      - name: Destroy guard
+        env:
+          DESTROY_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'destroy-approved') }}
+        run: |
+          chmod +x .guardrails-src/scripts/destroy-guard.sh
+          .guardrails-src/scripts/destroy-guard.sh ${{ inputs.terraform_dir }}/plan.json
+
+      - name: Summarise plan
+        if: always()
+        run: |
+          if [ -f "${{ inputs.terraform_dir }}/plan.json" ]; then
+            {
+              echo "### Terraform plan"
+              echo ""
+              echo '```'
+              jq -r '.resource_changes[]?
+                | select(.change.actions != ["no-op"])
+                | "\(.change.actions | join("+"))  \(.address)"' \
+                "${{ inputs.terraform_dir }}/plan.json" | sort
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Setup Infracost
+        if: inputs.enable_infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      - name: Cost diff
+        if: inputs.enable_infracost && github.event_name == 'pull_request'
+        run: |
+          infracost breakdown --path "${{ inputs.terraform_dir }}/plan.json" \
+            --format json --out-file /tmp/infracost.json
+          infracost comment github \
+            --path /tmp/infracost.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --pull-request "${{ github.event.pull_request.number }}" \
+            --github-token "${{ github.token }}" \
+            --behavior update

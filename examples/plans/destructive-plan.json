@@ -1,0 +1,23 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_db_instance.primary",
+      "type": "aws_db_instance",
+      "name": "primary",
+      "change": { "actions": ["delete", "create"] }
+    },
+    {
+      "address": "aws_s3_bucket.uploads",
+      "type": "aws_s3_bucket",
+      "name": "uploads",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "aws_iam_role.unused",
+      "type": "aws_iam_role",
+      "name": "unused",
+      "change": { "actions": ["delete"] }
+    }
+  ]
+}

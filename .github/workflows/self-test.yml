@@ -1,0 +1,67 @@
+name: Self test
+
+# The guardrails repo has to prove its own gates still gate. Every change here
+# runs the policy suite against a compliant fixture (must pass clean) and a
+# deliberately non-compliant one (must be blocked), plus both destroy-guard
+# paths. A policy that silently stops matching is worse than no policy.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  policy:
+    name: Policy fixtures
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install conftest
+        run: |
+          VERSION=0.56.0
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/conftest_${VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+
+      - name: Compliant fixture must pass
+        run: conftest test --parser hcl2 --combine --policy policy examples/pass/main.tf
+
+      - name: Non-compliant fixture must fail
+        run: |
+          if conftest test --parser hcl2 --combine --policy policy examples/fail/main.tf; then
+            echo "::error::The non-compliant fixture passed. The policies are not gating."
+            exit 1
+          fi
+          echo "Non-compliant fixture was blocked as expected."
+
+  destroy_guard:
+    name: Destroy guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Safe plan is allowed
+        run: scripts/destroy-guard.sh examples/plans/safe-plan.json
+
+      - name: Destructive plan is blocked
+        run: |
+          if scripts/destroy-guard.sh examples/plans/destructive-plan.json; then
+            echo "::error::Destroy guard allowed deletion of a protected resource."
+            exit 1
+          fi
+          echo "Destroy guard blocked the deletion as expected."
+
+      - name: Approved destructive plan is allowed
+        env:
+          DESTROY_APPROVED: "true"
+        run: scripts/destroy-guard.sh examples/plans/destructive-plan.json
+
+  shell:
+    name: Shellcheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: shellcheck scripts/*.sh install.sh

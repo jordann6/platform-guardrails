@@ -1,0 +1,23 @@
+{
+  "format_version": "1.2",
+  "resource_changes": [
+    {
+      "address": "aws_iam_role.app",
+      "type": "aws_iam_role",
+      "name": "app",
+      "change": { "actions": ["create"] }
+    },
+    {
+      "address": "aws_iam_role_policy_attachment.legacy",
+      "type": "aws_iam_role_policy_attachment",
+      "name": "legacy",
+      "change": { "actions": ["delete"] }
+    },
+    {
+      "address": "aws_security_group.web",
+      "type": "aws_security_group",
+      "name": "web",
+      "change": { "actions": ["update"] }
+    }
+  ]
+}

@@ -1,0 +1,140 @@
+name: Terraform Guardrails (static)
+
+# Reusable, credential-free static gates for Terraform repos.
+# Everything here runs without touching a cloud account, so it is safe to run
+# on pull requests from any source. Anything needing real credentials lives in
+# tf-plan.yml instead.
+
+on:
+  workflow_call:
+    inputs:
+      terraform_dir:
+        description: Directory holding the root Terraform module.
+        type: string
+        default: terraform
+      terraform_version:
+        description: Terraform version to install.
+        type: string
+        default: 1.11.3
+      checkov_baseline:
+        description: Path to a .checkov.baseline file. Empty means no baseline.
+        type: string
+        default: ""
+      trivy_severity:
+        description: Severities that fail the Trivy config scan.
+        type: string
+        default: CRITICAL,HIGH
+      policy_dir:
+        description: Directory of Rego policies to run with conftest.
+        type: string
+        default: policy
+      skip_policy:
+        description: Skip the conftest job (use while a repo is being adopted).
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  secrets:
+    name: Secret scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+
+  terraform:
+    name: Format + validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+      - name: Format check
+        run: terraform -chdir=${{ inputs.terraform_dir }} fmt -check -recursive
+      - name: Validate
+        run: |
+          terraform -chdir=${{ inputs.terraform_dir }} init -backend=false
+          terraform -chdir=${{ inputs.terraform_dir }} validate
+      - name: Assert provider lock file is committed
+        run: |
+          if [ ! -f "${{ inputs.terraform_dir }}/.terraform.lock.hcl" ]; then
+            echo "::error::.terraform.lock.hcl is not committed. Run 'terraform providers lock' and commit it."
+            exit 1
+          fi
+
+  tflint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: terraform-linters/setup-tflint@v4
+      - name: Init plugins
+        run: tflint --chdir=${{ inputs.terraform_dir }} --init
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+      - name: Lint
+        run: tflint --chdir=${{ inputs.terraform_dir }} --recursive --minimum-failure-severity=error
+
+  checkov:
+    name: Checkov IaC
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run Checkov
+        run: |
+          pip install --quiet checkov
+          args=(--directory "${{ inputs.terraform_dir }}" --framework terraform --quiet --compact)
+          if [ -n "${{ inputs.checkov_baseline }}" ]; then
+            args+=(--baseline "${{ inputs.checkov_baseline }}")
+          fi
+          checkov "${args[@]}"
+
+  trivy:
+    name: Trivy config
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: config
+          scan-ref: ${{ inputs.terraform_dir }}
+          severity: ${{ inputs.trivy_severity }}
+          exit-code: "1"
+          format: table
+
+  policy:
+    name: Org policy (conftest)
+    runs-on: ubuntu-latest
+    if: ${{ !inputs.skip_policy }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch shared policies
+        uses: actions/checkout@v4
+        with:
+          repository: jordann6/platform-guardrails
+          path: .guardrails-src
+      - name: Install conftest
+        run: |
+          VERSION=0.56.0
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/conftest_${VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+      - name: Test Terraform against policy
+        run: |
+          policy_args=(--policy .guardrails-src/policy)
+          if [ -d "${{ inputs.policy_dir }}" ]; then
+            policy_args+=(--policy "${{ inputs.policy_dir }}")
+          fi
+          mapfile -t files < <(find "${{ inputs.terraform_dir }}" -name '*.tf' -not -path '*/.terraform/*')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Terraform files found under ${{ inputs.terraform_dir }}"; exit 1
+          fi
+          # --combine is required: rules like "provider default_tags satisfy the
+          # tag requirement" span files, and per-file evaluation cannot see that.
+          conftest test --parser hcl2 --combine "${policy_args[@]}" "${files[@]}"

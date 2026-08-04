@@ -1,0 +1,30 @@
+name: Guardrails
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    uses: jordann6/platform-guardrails/.github/workflows/tf-ci.yml@v1
+    with:
+      terraform_dir: __TF_DIR__
+      # Set once the repo has a baseline committed:
+      # checkov_baseline: .checkov.baseline
+
+  # Needs an OIDC role before it can run. Fill in aws_role_arn and remove the
+  # `if: false` guard to turn on plan, destroy guard, and cost diff.
+  plan:
+    if: false
+    uses: jordann6/platform-guardrails/.github/workflows/tf-plan.yml@v1
+    with:
+      terraform_dir: __TF_DIR__
+      aws_role_arn: ""
+      aws_region: us-east-2
+      enable_infracost: false
+    secrets:
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}

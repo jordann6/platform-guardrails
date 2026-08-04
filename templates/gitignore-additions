@@ -1,0 +1,22 @@
+# Terraform state and plans: state contains secrets in plaintext, plans contain
+# resolved values. Neither belongs in git.
+*.tfstate
+*.tfstate.*
+*.tfvars
+!example.tfvars
+tfplan
+plan.json
+.terraform/
+crash.log
+
+# Cloud credentials and kubeconfigs
+.env
+.envrc
+kubeconfig
+*.kubeconfig
+*.pem
+*.ppk
+
+# Tooling output
+.checkov.json
+infracost.json
