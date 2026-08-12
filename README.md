@@ -1,7 +1,8 @@
 # platform-guardrails
 
-Reusable CI gates for Terraform repositories. One callable workflow, one policy
-suite, one destroy guard, wired into a new repo in three lines.
+Reusable CI gates for the portfolio fleet. Two callable workflows cover any
+stack: `ci.yml` for general repos (auto-detects Terraform, Python, Docker, Node,
+Go) and `tf-ci.yml` for Terraform-only repos with stricter gates.
 
 The problem this solves: infrastructure code that applies cleanly and does the
 wrong thing permanently. A wide-open security group, a log group that bills
@@ -39,6 +40,30 @@ cannot actually prove the finding (a `jsonencode`d IAM document is an opaque
 string, so the policy says "read this" rather than pretending to know).
 
 ## Using it in a repo
+
+### ci.yml — general purpose (recommended for most repos)
+
+Auto-detects stack and runs appropriate gates. SARIF upload puts findings in the
+GitHub Security tab.
+
+```yaml
+# .github/workflows/ci.yml
+name: CI
+on: [push, pull_request]
+jobs:
+  ci:
+    uses: jordann6/platform-guardrails/.github/workflows/ci.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+    # Optional: fail on findings instead of report-only
+    # with:
+    #   enforce_iac: true
+    #   enforce_sast: true
+    #   enforce_container: true
+```
+
+### tf-ci.yml — Terraform with stricter gates
 
 ```yaml
 # .github/workflows/guardrails.yml

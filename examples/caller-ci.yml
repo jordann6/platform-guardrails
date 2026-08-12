@@ -1,0 +1,20 @@
+# Example caller workflow - copy to .github/workflows/ci.yml in your repo
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci:
+    uses: jordann6/platform-guardrails/.github/workflows/ci.yml@v1
+    permissions:
+      contents: read
+      security-events: write
+    # Uncomment to enable enforcement (fail on findings):
+    # with:
+    #   enforce_iac: true
+    #   enforce_sast: true
+    #   enforce_container: true
