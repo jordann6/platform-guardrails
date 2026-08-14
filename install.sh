@@ -83,6 +83,10 @@ Done. Remaining manual steps:
      gate blocks new problems without blocking the adoption commit:
        checkov -d $TF_DIR --framework terraform --create-baseline
        # then set checkov_baseline in .github/workflows/guardrails.yml
-  4. For the credentialed plan job, set aws_role_arn in the caller workflow and
-     confirm the OIDC trust policy is scoped to this repo.
+  4. The credentialed gates (plan, destroy guard, cost diff) are not installed,
+     because they need an OIDC role ARN this script cannot know. Once that role
+     exists, copy the plan job from "The credentialed half" in the guardrails
+     README, and confirm the trust policy is scoped to this repo. Add it only
+     when the role is real: a gated job with missing permissions fails the run
+     at startup rather than skipping.
 EOF

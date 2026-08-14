@@ -69,6 +69,8 @@ jobs:
 # .github/workflows/guardrails.yml
 name: Guardrails
 on: [push, pull_request]
+permissions:
+  contents: read
 jobs:
   static:
     uses: jordann6/platform-guardrails/.github/workflows/tf-ci.yml@v1
@@ -109,6 +111,39 @@ It plans, runs the destroy guard, summarises the changes into the job summary,
 and posts a cost diff. The destroy guard is bypassed only by labelling the pull
 request `destroy-approved`, which makes "yes, delete the database" an explicit,
 recorded act rather than a scroll-past.
+
+`install.sh` does not wire this up, because it cannot know your role ARN. Once
+the role exists, add this job to the repo's `guardrails.yml`:
+
+```yaml
+  plan:
+    permissions:
+      contents: read
+      id-token: write
+      pull-requests: write
+    uses: jordann6/platform-guardrails/.github/workflows/tf-plan.yml@v1
+    with:
+      terraform_dir: terraform
+      aws_role_arn: arn:aws:iam::111111111111:role/gha-plan
+      aws_region: us-east-2
+      enable_infracost: false
+    secrets:
+      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
+```
+
+Two things about that block are load-bearing.
+
+The permissions must sit on the job, not at the top of the file. `tf-plan.yml`
+declares `id-token: write` and `pull-requests: write`, and a reusable workflow
+cannot be granted more than its caller holds. Hoisting them to workflow level
+also works, and quietly hands OIDC token-minting to the `static` job, which on a
+`pull_request` event is running Terraform written by whoever opened the PR. That
+is the exact split these two workflows exist to maintain.
+
+There is no point adding the job with an empty `aws_role_arn` and an `if: false`
+until the role is ready. GitHub resolves `uses:` and checks the requested
+permissions *before* it evaluates `if:`, so a gated job with missing permissions
+still fails the entire run at startup, with no logs and no jobs, on every push.
 
 ## Local use
 

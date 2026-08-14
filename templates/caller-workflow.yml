@@ -5,6 +5,14 @@ on:
     branches: [main]
   pull_request:
 
+# Credential-free by design. Everything below runs static analysis over
+# Terraform that, on a pull_request event, was authored by whoever opened the
+# PR. Nothing here should ever hold a permission that can mint a cloud token.
+#
+# The credentialed gates (plan, destroy guard, cost diff) live in tf-plan.yml
+# and are deliberately not wired up here, because they need an OIDC role ARN
+# that this installer has no way to know. See "The credentialed half" in the
+# platform-guardrails README for the block to paste in once you have a role.
 permissions:
   contents: read
 
@@ -15,16 +23,3 @@ jobs:
       terraform_dir: __TF_DIR__
       # Set once the repo has a baseline committed:
       # checkov_baseline: .checkov.baseline
-
-  # Needs an OIDC role before it can run. Fill in aws_role_arn and remove the
-  # `if: false` guard to turn on plan, destroy guard, and cost diff.
-  plan:
-    if: false
-    uses: jordann6/platform-guardrails/.github/workflows/tf-plan.yml@v1
-    with:
-      terraform_dir: __TF_DIR__
-      aws_role_arn: ""
-      aws_region: us-east-2
-      enable_infracost: false
-    secrets:
-      INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
