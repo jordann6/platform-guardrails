@@ -1,0 +1,136 @@
+name: FinOps Gate
+
+# Reusable FinOps gate for Terraform repos. Two jobs:
+#
+#   allocation  – runs the FinOps allocation policy (finops.rego) with conftest.
+#                 Credential-free; fails the PR on a missing or placeholder
+#                 CostCenter tag before the resource ever exists.
+#   cost        – runs Infracost and *gates* on the projected monthly delta.
+#                 The rest of the toolkit only comments on cost (see README);
+#                 this fails the PR when a change pushes monthly spend up by more
+#                 than max_monthly_increase, overridable with a 'cost-approved'
+#                 label. Infracost parses HCL directly, so no cloud credentials
+#                 and no terraform plan are needed: this stays credential-free.
+#
+# tags.rego and cost.rego already run in tf-ci.yml, and finops.rego joins them
+# there automatically once it is committed. This workflow exists for the piece
+# tf-ci cannot do without Infracost: turning cost from a comment into a gate.
+
+on:
+  workflow_call:
+    inputs:
+      terraform_dir:
+        description: Directory holding the root Terraform module.
+        type: string
+        default: terraform
+      policy_dir:
+        description: Repo-local Rego policies to run alongside the shared set.
+        type: string
+        default: policy
+      max_monthly_increase:
+        description: Max projected USD/month increase a PR may add before it fails.
+        type: string
+        default: "50"
+      fail_on_cost:
+        description: Fail the PR when the delta exceeds the limit (false = comment only).
+        type: boolean
+        default: true
+    secrets:
+      INFRACOST_API_KEY:
+        description: Infracost API key. Required for the cost job (free tier is fine).
+        required: false
+
+permissions:
+  contents: read
+  pull-requests: write
+
+jobs:
+  allocation:
+    name: Allocation policy (conftest)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch shared policies
+        uses: actions/checkout@v4
+        with:
+          repository: jordann6/platform-guardrails
+          path: .guardrails-src
+
+      - name: Install conftest
+        run: |
+          VERSION=0.56.0
+          curl -sSL "https://github.com/open-policy-agent/conftest/releases/download/v${VERSION}/conftest_${VERSION}_Linux_x86_64.tar.gz" \
+            | sudo tar -xz -C /usr/local/bin conftest
+
+      - name: Test Terraform against FinOps policy
+        run: |
+          policy_args=(--policy .guardrails-src/policy)
+          if [ -d "${{ inputs.policy_dir }}" ]; then
+            policy_args+=(--policy "${{ inputs.policy_dir }}")
+          fi
+          mapfile -t files < <(find "${{ inputs.terraform_dir }}" -name '*.tf' -not -path '*/.terraform/*')
+          if [ ${#files[@]} -eq 0 ]; then
+            echo "No Terraform files found under ${{ inputs.terraform_dir }}"; exit 1
+          fi
+          # --combine is required: the "provider default_tags satisfies the
+          # requirement" rules span files and cannot be evaluated per file.
+          conftest test --parser hcl2 --combine "${policy_args[@]}" "${files[@]}"
+
+  cost:
+    name: Cost threshold (Infracost)
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Infracost
+        uses: infracost/actions/setup@v3
+        with:
+          api-key: ${{ secrets.INFRACOST_API_KEY }}
+
+      # Baseline: the cost of the target branch as it stands today. A shallow
+      # worktree of the base ref keeps this to one extra fetch.
+      - name: Baseline cost (base ref)
+        run: |
+          git fetch origin "${{ github.event.pull_request.base.ref }}" --depth=1
+          git worktree add /tmp/base "origin/${{ github.event.pull_request.base.ref }}"
+          infracost breakdown \
+            --path "/tmp/base/${{ inputs.terraform_dir }}" \
+            --format json \
+            --out-file /tmp/base.json
+
+      - name: Cost diff
+        run: |
+          infracost diff \
+            --path "${{ inputs.terraform_dir }}" \
+            --compare-to /tmp/base.json \
+            --format json \
+            --out-file /tmp/diff.json
+
+      - name: Comment on PR
+        run: |
+          infracost comment github \
+            --path /tmp/diff.json \
+            --repo "$GITHUB_REPOSITORY" \
+            --pull-request "${{ github.event.pull_request.number }}" \
+            --github-token "${{ github.token }}" \
+            --behavior update
+
+      - name: Enforce threshold
+        if: ${{ inputs.fail_on_cost }}
+        env:
+          APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'cost-approved') }}
+        run: |
+          delta=$(jq -r '.diffTotalMonthlyCost // "0"' /tmp/diff.json)
+          limit="${{ inputs.max_monthly_increase }}"
+          over=$(awk -v d="$delta" -v l="$limit" 'BEGIN { print (d > l) ? 1 : 0 }')
+          printf 'Projected monthly change: $%s (limit: $%s)\n' "$delta" "$limit"
+          if [ "$over" -eq 1 ]; then
+            if [ "$APPROVED" = "true" ]; then
+              echo "::notice::Over the \$$limit/mo gate, but 'cost-approved' label is present. Passing."
+              exit 0
+            fi
+            echo "::error::This PR adds \$$delta/mo, above the \$$limit/mo gate. Justify and add the 'cost-approved' label to override."
+            exit 1
+          fi

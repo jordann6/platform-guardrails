@@ -23,3 +23,24 @@ jobs:
       terraform_dir: __TF_DIR__
       # Set once the repo has a baseline committed:
       # checkov_baseline: .checkov.baseline
+
+  # The FinOps allocation policy (finops.rego) already runs inside `static`
+  # above, because tf-ci.yml evaluates the whole shared policy/ directory. So
+  # the CostCenter tag gate needs no wiring: it is on the moment this file is.
+  #
+  # The one FinOps piece that is NOT credential-free is the cost *threshold*.
+  # It needs the INFRACOST_API_KEY secret (free tier is fine), so it stays
+  # commented until that secret exists on the repo, matching the plan gate.
+  # Uncomment once it does:
+  #
+  # finops:
+  #   uses: jordann6/platform-guardrails/.github/workflows/finops-gate.yml@v1
+  #   permissions:
+  #     contents: read
+  #     pull-requests: write
+  #   with:
+  #     terraform_dir: __TF_DIR__
+  #     max_monthly_increase: "50"   # USD/month a PR may add before it fails
+  #     fail_on_cost: true           # false = comment only
+  #   secrets:
+  #     INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}

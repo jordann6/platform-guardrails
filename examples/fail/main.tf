@@ -17,6 +17,7 @@ resource "aws_cloudwatch_log_group" "forever" {
     Environment = "dev"
     Owner       = "jordan"
     ManagedBy   = "terraform"
+    CostCenter  = "TODO" # placeholder allocation tag: looks billed, is not
   }
 }
 
@@ -93,6 +94,44 @@ resource "aws_instance" "oversized" {
     Environment = "dev"
     Owner       = "jordan"
     ManagedBy   = "terraform"
+    CostCenter  = "cc-0009"
+  }
+}
+
+# gp2 volume: gp3 is ~20% cheaper for equal performance, so the FinOps waste
+# warn should fire here.
+resource "aws_ebs_volume" "legacy" {
+  availability_zone = "us-east-2a"
+  size              = 100
+  type              = "gp2"
+
+  tags = {
+    Project     = "guardrails-fixture"
+    Environment = "dev"
+    Owner       = "jordan"
+    ManagedBy   = "terraform"
+    CostCenter  = "cc-0100"
+  }
+}
+
+# A real, resolved CostCenter that does not match the house format: the cost
+# centre format warn should fire, without tripping any deny.
+resource "aws_dynamodb_table" "misformatted" {
+  name         = "fixture"
+  hash_key     = "id"
+  billing_mode = "PAY_PER_REQUEST"
+
+  attribute {
+    name = "id"
+    type = "S"
+  }
+
+  tags = {
+    Project     = "guardrails-fixture"
+    Environment = "dev"
+    Owner       = "jordan"
+    ManagedBy   = "terraform"
+    CostCenter  = "platform-team"
   }
 }
 

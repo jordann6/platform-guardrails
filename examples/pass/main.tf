@@ -5,8 +5,9 @@ provider "aws" {
 
   default_tags {
     tags = {
-      Project   = "guardrails-fixture"
-      ManagedBy = "terraform"
+      Project    = "guardrails-fixture"
+      ManagedBy  = "terraform"
+      CostCenter = "cc-0001"
     }
   }
 }

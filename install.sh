@@ -89,4 +89,10 @@ Done. Remaining manual steps:
      README, and confirm the trust policy is scoped to this repo. Add it only
      when the role is real: a gated job with missing permissions fails the run
      at startup rather than skipping.
+  5. The FinOps allocation policy (CostCenter tag gate) is already active: it
+     runs inside the static job via the shared policy set, no wiring needed.
+     The FinOps cost *threshold* is stubbed as a commented 'finops' job in
+     .github/workflows/guardrails.yml. Add the INFRACOST_API_KEY secret to the
+     repo (free tier is fine), then uncomment that job to fail PRs that raise
+     projected monthly spend past the limit.
 EOF
