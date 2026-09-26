@@ -1,0 +1,155 @@
+name: Terraform Apply Guardrails (gated)
+
+# Reusable workflow for a credentialed, reviewer-gated apply. This is the
+# just-in-time-to-prod control expressed in CI: no standing permission to change
+# infrastructure, elevation is a recorded, approved act.
+#
+# The gate is a GitHub environment with a required reviewer. It is enforced by
+# splitting the run into two jobs:
+#
+#   plan   – authenticates read-only, produces the exact plan, runs the destroy
+#            guard, and saves that plan as an artifact. No environment, so it
+#            runs immediately and the reviewer has something to look at.
+#   apply  – bound to the environment, so it pauses for approval before it does
+#            anything, then applies the SAVED plan from the plan job. The
+#            reviewer approves the specific change they read, not a promise to
+#            re-plan.
+#
+# Two roles by design: plan assumes a read-scoped role, apply assumes a
+# write-scoped one that only the environment can reach. A read token can never
+# mutate, even if the plan job is compromised by PR-authored Terraform.
+
+on:
+  workflow_call:
+    inputs:
+      terraform_dir:
+        type: string
+        default: terraform
+      terraform_version:
+        type: string
+        default: 1.11.3
+      environment:
+        description: GitHub environment gating the apply (must have a required reviewer).
+        type: string
+        required: true
+      plan_role_arn:
+        description: Read-scoped role assumed via OIDC for the plan. Empty for non-AWS.
+        type: string
+        default: ""
+      apply_role_arn:
+        description: Write-scoped role assumed via OIDC for the apply. Empty for non-AWS.
+        type: string
+        default: ""
+      aws_region:
+        type: string
+        default: us-east-1
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Plan + destroy guard
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch guardrail scripts
+        uses: actions/checkout@v4
+        with:
+          repository: jordann6/platform-guardrails
+          path: .guardrails-src
+
+      - name: Configure AWS credentials (OIDC, read-scoped)
+        if: inputs.plan_role_arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.plan_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Plan
+        run: |
+          terraform -chdir=${{ inputs.terraform_dir }} init
+          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false
+          terraform -chdir=${{ inputs.terraform_dir }} show -json tfplan \
+            > "${{ inputs.terraform_dir }}/plan.json"
+
+      # Same gate as tf-plan.yml: a delete or replace of a stateful resource is
+      # blocked unless the PR carries 'destroy-approved'. An apply is exactly
+      # when that matters, because here the plan actually runs.
+      - name: Destroy guard
+        env:
+          DESTROY_APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'destroy-approved') }}
+        run: |
+          chmod +x .guardrails-src/scripts/destroy-guard.sh
+          .guardrails-src/scripts/destroy-guard.sh ${{ inputs.terraform_dir }}/plan.json
+
+      - name: Summarise plan
+        if: always()
+        run: |
+          if [ -f "${{ inputs.terraform_dir }}/plan.json" ]; then
+            {
+              echo "### Terraform plan (pending approval on '${{ inputs.environment }}')"
+              echo ""
+              echo '```'
+              jq -r '.resource_changes[]?
+                | select(.change.actions != ["no-op"])
+                | "\(.change.actions | join("+"))  \(.address)"' \
+                "${{ inputs.terraform_dir }}/plan.json" | sort
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      # The binary plan is what apply consumes, so the reviewer approves exactly
+      # what runs. plan.json rides along for the record.
+      - name: Upload plan
+        uses: actions/upload-artifact@v4
+        with:
+          name: tfplan
+          path: |
+            ${{ inputs.terraform_dir }}/tfplan
+            ${{ inputs.terraform_dir }}/plan.json
+          retention-days: 1
+          if-no-files-found: error
+
+  apply:
+    name: Apply (gated)
+    needs: plan
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download plan
+        uses: actions/download-artifact@v4
+        with:
+          name: tfplan
+          path: ${{ inputs.terraform_dir }}
+
+      - name: Configure AWS credentials (OIDC, write-scoped)
+        if: inputs.apply_role_arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.apply_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      # init re-materialises the providers this runner needs to apply the saved
+      # plan; the plan file itself is not re-generated, it is replayed.
+      - name: Apply saved plan
+        run: |
+          terraform -chdir=${{ inputs.terraform_dir }} init
+          terraform -chdir=${{ inputs.terraform_dir }} apply -input=false tfplan

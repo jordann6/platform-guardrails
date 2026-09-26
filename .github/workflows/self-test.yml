@@ -59,6 +59,23 @@ jobs:
           DESTROY_APPROVED: "true"
         run: scripts/destroy-guard.sh examples/plans/destructive-plan.json
 
+  hourly_guard:
+    name: Hourly guard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clean state is allowed
+        run: scripts/hourly-guard.sh examples/state/clean.txt
+
+      - name: State with hourly resources is flagged
+        run: |
+          if scripts/hourly-guard.sh examples/state/with-hourly.txt; then
+            echo "::error::Hourly guard passed a state that contains a NAT gateway and an RDS instance."
+            exit 1
+          fi
+          echo "Hourly guard flagged the standing resources as expected."
+
   shell:
     name: Shellcheck
     runs-on: ubuntu-latest

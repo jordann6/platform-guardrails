@@ -145,6 +145,59 @@ until the role is ready. GitHub resolves `uses:` and checks the requested
 permissions *before* it evaluates `if:`, so a gated job with missing permissions
 still fails the entire run at startup, with no logs and no jobs, on every push.
 
+## Gated apply, destroy, and the TTL guard
+
+`tf-plan.yml` reads. Three more workflows write, tear down, and watch, and all
+three authenticate with OIDC only.
+
+`tf-apply.yml` is the just-in-time-to-prod control expressed in CI. It plans
+read-only, runs the destroy guard, and saves that exact plan; a second job bound
+to a GitHub environment pauses for a required reviewer and then applies the saved
+plan. The reviewer approves the change they read, not a promise to re-plan, and
+the write-scoped role lives behind the environment so the plan half can never
+mutate. Two roles, by design.
+
+```yaml
+  apply:
+    uses: jordann6/platform-guardrails/.github/workflows/tf-apply.yml@v1.3.0
+    with:
+      terraform_dir: terraform
+      environment: prod-apply          # must have a required reviewer
+      plan_role_arn:  arn:aws:iam::111111111111:role/gha-plan
+      apply_role_arn: arn:aws:iam::111111111111:role/gha-apply
+      aws_region: us-east-1
+```
+
+`tf-destroy.yml` has two modes because a teardown and the timer that watches for
+a forgotten teardown are the same operation from two ends. With `check_only:
+false` (wire it to `workflow_dispatch`) it destroys, then re-reads state and
+fails if anything hourly survived, which is the section-8 teardown verification.
+With `check_only: true` (wire it to `on: schedule`) it is the TTL guard: it reads
+live state and fails if any hourly-billed resource is still standing. The red
+scheduled run is the alarm; it changes nothing unless you also set
+`auto_destroy: true`.
+
+```yaml
+# .github/workflows/ttl-guard.yml
+on:
+  schedule:
+    - cron: "0 * * * *"   # hourly: is anything billable still up?
+jobs:
+  ttl:
+    uses: jordann6/platform-guardrails/.github/workflows/tf-destroy.yml@v1.3.0
+    with:
+      terraform_dir: terraform
+      aws_role_arn: arn:aws:iam::111111111111:role/gha-plan
+      check_only: true
+```
+
+What counts as "hourly" is `scripts/hourly-guard.sh`: NAT gateways, managed
+firewalls, VPC/private endpoints, managed databases, k8s control planes, load
+balancers, VMs, and their Azure/GCP equivalents. KMS keys, empty backup vaults,
+secrets, and log groups are deliberately excluded: they are the ~$1-3/mo standing
+footprint the design lets survive a destroy. Override the list per repo with
+`.guardrails/hourly-types.txt`.
+
 ## Local use
 
 ```bash

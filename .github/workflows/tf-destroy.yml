@@ -1,0 +1,119 @@
+name: Terraform Destroy / TTL Guard (credentialed)
+
+# Reusable workflow with two modes, because teardown and the timer that watches
+# for a forgotten teardown are the same operation seen from two ends.
+#
+#   check_only: true  (TTL guard, scheduled)
+#     Reads live state and fails if any hourly-billed resource is standing. The
+#     failure IS the alarm: a red scheduled run and its notification. It changes
+#     nothing. Wire it to `on: schedule` in the caller. Optionally flip
+#     auto_destroy to have a tripped guard tear down on its own.
+#
+#   check_only: false (manual teardown, workflow_dispatch)
+#     Runs `terraform destroy`, then re-checks state and fails if anything
+#     hourly survived. This is the section-8 teardown verification: destroy is
+#     not "done" until nothing billable remains.
+#
+# Gated by a GitHub environment so a destroy (or an auto-destroy) is a recorded,
+# reviewer-approved act, not something a cron job does silently to real infra.
+
+on:
+  workflow_call:
+    inputs:
+      terraform_dir:
+        type: string
+        default: terraform
+      terraform_version:
+        type: string
+        default: 1.11.3
+      environment:
+        description: GitHub environment gating the destroy (required reviewer recommended).
+        type: string
+        default: ""
+      aws_role_arn:
+        description: Role assumed via OIDC. Needs destroy rights unless check_only. Empty for non-AWS.
+        type: string
+        default: ""
+      aws_region:
+        type: string
+        default: us-east-1
+      check_only:
+        description: TTL guard mode. Only report standing hourly resources; do not destroy.
+        type: boolean
+        default: false
+      auto_destroy:
+        description: In check_only mode, destroy when the guard trips instead of only alarming.
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+jobs:
+  destroy:
+    name: ${{ inputs.check_only && 'TTL guard' || 'Destroy' }}
+    runs-on: ubuntu-latest
+    environment: ${{ inputs.environment }}
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Fetch guardrail scripts
+        uses: actions/checkout@v4
+        with:
+          repository: jordann6/platform-guardrails
+          path: .guardrails-src
+
+      - name: Configure AWS credentials (OIDC)
+        if: inputs.aws_role_arn != ''
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+
+      - name: Init
+        run: terraform -chdir=${{ inputs.terraform_dir }} init
+
+      # Snapshot what is standing before we do anything.
+      - name: Inspect state for hourly resources
+        id: inspect
+        run: |
+          chmod +x .guardrails-src/scripts/hourly-guard.sh
+          terraform -chdir=${{ inputs.terraform_dir }} state list > /tmp/state.txt || true
+          if .guardrails-src/scripts/hourly-guard.sh /tmp/state.txt; then
+            echo "standing=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "standing=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      # TTL guard, no auto-destroy: the guard's own exit code is the alarm.
+      - name: TTL alarm
+        if: inputs.check_only && !inputs.auto_destroy
+        run: |
+          if [ "${{ steps.inspect.outputs.standing }}" = "true" ]; then
+            echo "::error::Hourly-billed resources are still standing past their TTL. Run the destroy."
+            exit 1
+          fi
+          echo "TTL guard clean: nothing hourly is standing."
+
+      # Destroy: either an explicit teardown, or a tripped TTL guard set to act.
+      - name: Destroy
+        if: ${{ !inputs.check_only || (inputs.check_only && inputs.auto_destroy && steps.inspect.outputs.standing == 'true') }}
+        run: terraform -chdir=${{ inputs.terraform_dir }} destroy -auto-approve -input=false
+
+      # Post-destroy verification (section 8): prove nothing hourly survived.
+      - name: Verify teardown
+        if: ${{ !inputs.check_only || (inputs.check_only && inputs.auto_destroy && steps.inspect.outputs.standing == 'true') }}
+        run: |
+          terraform -chdir=${{ inputs.terraform_dir }} state list > /tmp/state-after.txt || true
+          if ! .guardrails-src/scripts/hourly-guard.sh /tmp/state-after.txt; then
+            echo "::error::Destroy completed but hourly resources remain in state. Check the teardown traps."
+            exit 1
+          fi
+          echo "Teardown verified: no hourly-billed resources remain."
