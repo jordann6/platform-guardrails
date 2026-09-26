@@ -1,0 +1,5 @@
+aws_organizations_organization.org
+aws_organizations_organizational_unit.workloads
+aws_kms_key.backup
+aws_nat_gateway.egress
+module.data.aws_db_instance.primary

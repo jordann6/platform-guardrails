@@ -47,6 +47,14 @@ test: ## Prove the policies still gate: pass fixture clean, fail fixture blocked
 	else \
 		echo "OK: destroy guard blocked the deletion."; \
 	fi
+	@echo "--> hourly guard"
+	@scripts/hourly-guard.sh examples/state/clean.txt
+	@if scripts/hourly-guard.sh examples/state/with-hourly.txt; then \
+		echo "FAIL: hourly guard passed a state with a NAT gateway and RDS instance."; \
+		exit 1; \
+	else \
+		echo "OK: hourly guard flagged the standing resources."; \
+	fi
 
 .PHONY: guard
 guard: ## Plan and run the destroy guard against the real plan
