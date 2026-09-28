@@ -26,18 +26,43 @@ of a long day. They have to be caught mechanically.
 
 Custom policy in `policy/`:
 
-- **tags** — every significant resource carries `Project`, `Environment`,
+- **tags**: every significant resource carries `Project`, `Environment`,
   `Owner`, `ManagedBy`. Provider-level `default_tags` count toward this. Makes a
-  surprise line item traceable to the thing that caused it.
-- **cost** — approved regions only, `retention_in_days` required on every log
-  group, warnings on multiple NAT gateways and oversized instances.
-- **network** — no `0.0.0.0/0` ingress outside 80/443, no wide-open Azure NSG
-  rules, no `aws_iam_access_key` (federate with OIDC instead), warning on IAM
-  policies that appear to grant `Action:*` on `Resource:*`.
+  surprise line item traceable to the thing that caused it. On a GCP-only repo
+  the same intent uses lowercase labels (`project`, `owner`, `managed-by`) and
+  provider `default_labels`. Resource-level label findings are enforced once a
+  GCP repo declares `default_labels`, and advisory before that, so adoption is a
+  ratchet rather than a flag day.
+- **finops**: `CostCenter` (AWS/Azure) or the `cost_center` label (GCP) present,
+  not a placeholder, and in the `cc-NNNN` format.
+- **cost**: approved regions only (AWS, Azure, and GCP US regions),
+  `retention_in_days` required on every log group, warnings on multiple NAT
+  gateways, oversized instances and GCP machine types, and REGIONAL (HA) Cloud
+  SQL outside prod.
+- **network**: no `0.0.0.0/0` ingress outside 80/443 on security groups, NSGs,
+  GCP VPC firewall rules, or GCP hierarchical/network firewall policy rules. No
+  long-lived credentials (`aws_iam_access_key`, `google_service_account_key`).
+  No external IPs on GCP VMs, no public Cloud SQL IPv4, no `allUsers` bucket
+  grants. Warnings on IAM policies that appear to grant `Action:*` on
+  `Resource:*` and on GCP basic roles (owner/editor).
 
 `deny` blocks the build. `warn` prints and passes, used where static analysis
 cannot actually prove the finding (a `jsonencode`d IAM document is an opaque
 string, so the policy says "read this" rather than pretending to know).
+
+## Cloud authentication
+
+The credentialed workflows (`tf-plan`, `tf-apply`, `tf-destroy`) authenticate
+with OIDC only, per cloud:
+
+| Cloud | Inputs | Mechanism |
+|---|---|---|
+| AWS | `aws_role_arn` (plan/destroy), `plan_role_arn` + `apply_role_arn` (apply) | `aws-actions/configure-aws-credentials` |
+| GCP | `gcp_workload_identity_provider` + `gcp_service_account` (plan/destroy), `gcp_plan_service_account` + `gcp_apply_service_account` (apply) | `google-github-actions/auth` through Workload Identity Federation |
+| Azure | not yet | Azure repos run their static gates here and apply locally until an `azure/login` path lands |
+
+Each auth step self-skips when its inputs are empty, so a caller passes only
+its own cloud's values.
 
 ## Using it in a repo
 

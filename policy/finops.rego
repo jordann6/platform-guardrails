@@ -61,6 +61,7 @@ is_placeholder(v) if {
 # static guarantee that the allocation key reaches every resource.
 deny contains msg if {
 	uses_modules
+	not gcp_only
 	not allocation_tag in default_tag_keys
 
 	msg := sprintf(
@@ -127,6 +128,72 @@ warn contains msg if {
 	msg := sprintf(
 		"%s: %s.%s sets %q to %q, which does not match the expected cost centre format %q. Mismatched codes split the allocation report.",
 		[r.path, r.type, r.name, allocation_tag, v, cost_center_pattern],
+	)
+}
+
+# --- GCP: cost_center label ---------------------------------------------------
+#
+# Same allocation rule, GCP spelling. Label keys must be lowercase, so the key is
+# cost_center; the value format is the same cc-NNNN code, which is already valid
+# as a label value.
+
+allocation_label := "cost_center"
+
+default_alloc_label_values contains v if {
+	some p in providers
+	startswith(p.name, "google")
+	is_object(p.body.default_labels)
+	v := p.body.default_labels[allocation_label]
+}
+
+deny contains msg if {
+	gcp_only
+	uses_modules
+	not allocation_label in default_label_keys
+
+	msg := sprintf(
+		"this GCP repo declares module blocks, so resources inside them can only be labelled by provider default_labels, and %q is not set there. Add it to the google provider default_labels.",
+		[allocation_label],
+	)
+}
+
+gcp_unallocated contains r if {
+	some r in resources
+	labelable(r.type)
+
+	labels := object.get(r.body, "labels", null)
+	not unresolved(labels)
+
+	not allocation_label in resource_label_keys(r.body)
+	not allocation_label in default_label_keys
+}
+
+# Same ratchet as tags.rego: enforced once the repo declares default_labels.
+deny contains msg if {
+	gcp_labels_adopted
+	some r in gcp_unallocated
+	msg := sprintf(
+		"%s: %s.%s is missing the %q allocation label, so its spend cannot be charged back. Set it on the resource or in provider default_labels.",
+		[r.path, r.type, r.name, allocation_label],
+	)
+}
+
+warn contains msg if {
+	not gcp_labels_adopted
+	some r in gcp_unallocated
+	msg := sprintf(
+		"%s: %s.%s is missing the %q allocation label (advisory until the repo declares provider default_labels).",
+		[r.path, r.type, r.name, allocation_label],
+	)
+}
+
+deny contains msg if {
+	some v in default_alloc_label_values
+	is_placeholder(v)
+
+	msg := sprintf(
+		"provider default_labels sets %q to placeholder %q, which stamps every resource with an unbillable cost centre.",
+		[allocation_label, v],
 	)
 }
 

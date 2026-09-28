@@ -48,6 +48,7 @@ uses_modules if {
 # reports into groups that do not add up.
 deny contains msg if {
 	uses_modules
+	not gcp_only
 	missing := required_tags - default_tag_keys
 	count(missing) > 0
 
@@ -73,4 +74,91 @@ deny contains msg if {
 		"%s: %s.%s is missing required tags %v",
 		[r.path, r.type, r.name, sort(missing)],
 	)
+}
+
+# --- GCP labels ----------------------------------------------------------------
+#
+# GCP has labels, not tags, and label keys must be lowercase, so the AWS key set
+# above cannot apply as written. A GCP repo is held to the same intent with the
+# keys GCP allows: project, owner, managed-by. Environment is stamped per project
+# by a project factory in most GCP layouts, so it is not required at provider
+# level here.
+#
+# A repo is treated as GCP-only when every provider block it declares is google
+# or google-beta. Mixed repos keep the AWS/Azure rules above.
+
+required_labels := {"project", "owner", "managed-by"}
+
+gcp_only if {
+	count(providers) > 0
+	every p in providers {
+		startswith(p.name, "google")
+	}
+}
+
+# Keys supplied by provider-level default_labels (google provider 5.0+). They
+# apply to every labelable resource the provider creates, same as default_tags.
+default_label_keys contains key if {
+	some p in providers
+	startswith(p.name, "google")
+	is_object(p.body.default_labels)
+	some key, _ in p.body.default_labels
+}
+
+# Types whose label attribute is literally `labels`. GKE clusters
+# (resource_labels) and Cloud SQL (settings.user_labels) carry labels under
+# other names, so they are enforced at the org by custom constraints rather than
+# guessed at here.
+labelable_patterns := ["^google_(project|compute_instance|storage_bucket|bigquery_dataset|pubsub_topic|kms_crypto_key|secret_manager_secret|artifact_registry_repository)$"]
+
+labelable(type) if {
+	matches_any(type, labelable_patterns)
+}
+
+resource_label_keys(body) := keys if {
+	is_object(body.labels)
+	keys := {k | some k, _ in body.labels}
+} else := set()
+
+deny contains msg if {
+	gcp_only
+	uses_modules
+	missing := required_labels - default_label_keys
+	count(missing) > 0
+
+	msg := sprintf(
+		"this GCP repo declares module blocks, so resources inside them can only be labelled by provider default_labels, and those are missing %v (found: %v). Add them to the google provider default_labels.",
+		[sort(missing), sort(default_label_keys)],
+	)
+}
+
+# Ratchet. A GCP repo opts in to resource-level label enforcement by declaring
+# default_labels on its provider. Repos that predate this rule see the same
+# findings as warnings, so adding GCP coverage here does not turn every existing
+# GCP repo red on its next push; declaring default_labels is the adoption step.
+gcp_labels_adopted if {
+	count(default_label_keys) > 0
+}
+
+gcp_missing_labels contains [r, missing] if {
+	some r in resources
+	labelable(r.type)
+
+	labels := object.get(r.body, "labels", null)
+	not unresolved(labels)
+
+	missing := required_labels - (resource_label_keys(r.body) | default_label_keys)
+	count(missing) > 0
+}
+
+deny contains msg if {
+	gcp_labels_adopted
+	some [r, missing] in gcp_missing_labels
+	msg := sprintf("%s: %s.%s is missing required labels %v", [r.path, r.type, r.name, sort(missing)])
+}
+
+warn contains msg if {
+	not gcp_labels_adopted
+	some [r, missing] in gcp_missing_labels
+	msg := sprintf("%s: %s.%s is missing required labels %v (advisory until the repo declares provider default_labels)", [r.path, r.type, r.name, sort(missing)])
 }

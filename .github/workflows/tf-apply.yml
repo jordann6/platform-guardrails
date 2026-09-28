@@ -43,6 +43,18 @@ on:
       aws_region:
         type: string
         default: us-east-1
+      gcp_workload_identity_provider:
+        description: GCP Workload Identity Federation provider resource name. Empty for non-GCP.
+        type: string
+        default: ""
+      gcp_plan_service_account:
+        description: Read-scoped GCP service account impersonated for the plan. Empty for non-GCP.
+        type: string
+        default: ""
+      gcp_apply_service_account:
+        description: Write-scoped GCP service account impersonated for the apply. Its WIF binding should be conditioned on the environment claim so only the gated job can reach it.
+        type: string
+        default: ""
 
 permissions:
   contents: read
@@ -69,6 +81,17 @@ jobs:
         with:
           role-to-assume: ${{ inputs.plan_role_arn }}
           aws-region: ${{ inputs.aws_region }}
+
+      # GCP path, same contract as the AWS one: OIDC only, no key file. The
+      # action exchanges the GitHub token through the WIF provider and writes an
+      # external-account credential config that the google provider reads via
+      # GOOGLE_APPLICATION_CREDENTIALS. Nothing long-lived touches the runner.
+      - name: Authenticate to GCP (OIDC via WIF, read-scoped)
+        if: inputs.gcp_workload_identity_provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_plan_service_account }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
@@ -142,6 +165,17 @@ jobs:
         with:
           role-to-assume: ${{ inputs.apply_role_arn }}
           aws-region: ${{ inputs.aws_region }}
+
+      # GCP path, same contract as the AWS one: OIDC only, no key file. The
+      # action exchanges the GitHub token through the WIF provider and writes an
+      # external-account credential config that the google provider reads via
+      # GOOGLE_APPLICATION_CREDENTIALS. Nothing long-lived touches the runner.
+      - name: Authenticate to GCP (OIDC via WIF, write-scoped)
+        if: inputs.gcp_workload_identity_provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_apply_service_account }}
 
       - uses: hashicorp/setup-terraform@v3
         with:

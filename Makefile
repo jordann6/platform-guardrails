@@ -39,6 +39,15 @@ test: ## Prove the policies still gate: pass fixture clean, fail fixture blocked
 	else \
 		echo "OK: non-compliant fixture was blocked as expected."; \
 	fi
+	@echo "--> GCP pass fixture (expect 0 failures)"
+	@conftest test --parser hcl2 --combine --policy policy examples/pass-gcp/main.tf
+	@echo "--> GCP fail fixture (expect failures)"
+	@if conftest test --parser hcl2 --combine --policy policy examples/fail-gcp/main.tf; then \
+		echo "FAIL: the non-compliant GCP fixture passed. The GCP rules are not gating."; \
+		exit 1; \
+	else \
+		echo "OK: non-compliant GCP fixture was blocked as expected."; \
+	fi
 	@echo "--> destroy guard"
 	@scripts/destroy-guard.sh examples/plans/safe-plan.json
 	@if scripts/destroy-guard.sh examples/plans/destructive-plan.json; then \

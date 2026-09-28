@@ -37,6 +37,17 @@ jobs:
           fi
           echo "Non-compliant fixture was blocked as expected."
 
+      - name: Compliant GCP fixture must pass
+        run: conftest test --parser hcl2 --combine --policy policy examples/pass-gcp/main.tf
+
+      - name: Non-compliant GCP fixture must fail
+        run: |
+          if conftest test --parser hcl2 --combine --policy policy examples/fail-gcp/main.tf; then
+            echo "::error::The non-compliant GCP fixture passed. The GCP rules are not gating."
+            exit 1
+          fi
+          echo "Non-compliant GCP fixture was blocked as expected."
+
   destroy_guard:
     name: Destroy guard
     runs-on: ubuntu-latest
