@@ -82,6 +82,10 @@ google_container_node_pool
 google_sql_database_instance
 google_compute_instance$
 google_compute_forwarding_rule
+google_compute_global_forwarding_rule
+google_compute_vpn_tunnel
+google_redis_instance
+google_alloydb_instance
 EOF
 )
 

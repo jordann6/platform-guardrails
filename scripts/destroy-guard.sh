@@ -59,6 +59,14 @@ DEFAULT_PATTERNS=$(
 ^azurerm_postgresql_.*$
 ^azurerm_kubernetes_cluster$
 ^azurerm_container_registry$
+^google_sql_database_instance$
+^google_storage_bucket$
+^google_bigquery_dataset$
+^google_kms_crypto_key$
+^google_secret_manager_secret$
+^google_artifact_registry_repository$
+^google_container_cluster$
+^google_logging_project_bucket_config$
 EOF
 )
 

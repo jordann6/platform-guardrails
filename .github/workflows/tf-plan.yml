@@ -20,6 +20,14 @@ on:
       aws_region:
         type: string
         default: us-east-2
+      gcp_workload_identity_provider:
+        description: GCP Workload Identity Federation provider resource name (projects/N/locations/global/workloadIdentityPools/P/providers/X). Empty for non-GCP.
+        type: string
+        default: ""
+      gcp_service_account:
+        description: GCP service account to impersonate through the WIF provider. Empty for non-GCP.
+        type: string
+        default: ""
       environment:
         description: GitHub environment to bind to (for required reviewers).
         type: string
@@ -57,6 +65,17 @@ jobs:
         with:
           role-to-assume: ${{ inputs.aws_role_arn }}
           aws-region: ${{ inputs.aws_region }}
+
+      # GCP path, same contract as the AWS one: OIDC only, no key file. The
+      # action exchanges the GitHub token through the WIF provider and writes an
+      # external-account credential config that the google provider reads via
+      # GOOGLE_APPLICATION_CREDENTIALS. Nothing long-lived touches the runner.
+      - name: Authenticate to GCP (OIDC via WIF)
+        if: inputs.gcp_workload_identity_provider != ''
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_service_account }}
 
       - uses: hashicorp/setup-terraform@v3
         with:
