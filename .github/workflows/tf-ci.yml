@@ -8,6 +8,13 @@ name: Terraform Guardrails (static)
 on:
   workflow_call:
     inputs:
+      guardrails_ref:
+        description: >-
+          platform-guardrails commit whose scripts and policies this run uses. Pass the
+          same SHA the caller pins in `uses:`, so the reviewed workflow and the scripts it
+          runs match. Empty falls back to the default branch (pre-v1.5.0 behavior).
+        type: string
+        default: ""
       terraform_dir:
         description: Directory holding the root Terraform module.
         type: string
@@ -41,7 +48,7 @@ jobs:
     name: Secret scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           fetch-depth: 0
 
@@ -68,8 +75,8 @@ jobs:
     name: Format + validate
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: hashicorp/setup-terraform@v3
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ inputs.terraform_version }}
       - name: Format check
@@ -89,8 +96,8 @@ jobs:
     name: Lint
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: terraform-linters/setup-tflint@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: terraform-linters/setup-tflint@90f302c255ef959cbfb4bd10581afecdb7ece3e6 # v4.1.1
       - name: Init plugins
         run: tflint --chdir=${{ inputs.terraform_dir }} --init
         env:
@@ -102,7 +109,7 @@ jobs:
     name: Checkov IaC
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run Checkov
         run: |
           pip install --quiet checkov
@@ -116,11 +123,11 @@ jobs:
     name: Trivy config
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       # Must carry the leading v. The unprefixed tags this action once published
       # have been removed upstream, so `@0.28.0` fails at Set up job with
       # "unable to find version", before any step runs.
-      - uses: aquasecurity/trivy-action@v0.36.0
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           scan-type: config
           scan-ref: ${{ inputs.terraform_dir }}
@@ -133,11 +140,12 @@ jobs:
     runs-on: ubuntu-latest
     if: ${{ !inputs.skip_policy }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Fetch shared policies
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: jordann6/platform-guardrails
+          ref: ${{ inputs.guardrails_ref }}
           path: .guardrails-src
       - name: Install conftest
         run: |

@@ -18,9 +18,10 @@ permissions:
 
 jobs:
   static:
-    uses: jordann6/platform-guardrails/.github/workflows/tf-ci.yml@v1
+    uses: jordann6/platform-guardrails/.github/workflows/tf-ci.yml@__REF__ # __REF_LABEL__
     with:
       terraform_dir: __TF_DIR__
+      guardrails_ref: __REF__
       # Set once the repo has a baseline committed:
       # checkov_baseline: .checkov.baseline
 
@@ -34,7 +35,7 @@ jobs:
   # Uncomment once it does:
   #
   # finops:
-  #   uses: jordann6/platform-guardrails/.github/workflows/finops-gate.yml@v1
+  #   uses: jordann6/platform-guardrails/.github/workflows/finops-gate.yml@__REF__ # __REF_LABEL__
   #   permissions:
   #     contents: read
   #     pull-requests: write
@@ -42,5 +43,6 @@ jobs:
   #     terraform_dir: __TF_DIR__
   #     max_monthly_increase: "50"   # USD/month a PR may add before it fails
   #     fail_on_cost: true           # false = comment only
+  #     guardrails_ref: __REF__
   #   secrets:
   #     INFRACOST_API_KEY: ${{ secrets.INFRACOST_API_KEY }}
