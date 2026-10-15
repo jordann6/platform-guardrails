@@ -19,6 +19,13 @@ name: FinOps Gate
 on:
   workflow_call:
     inputs:
+      guardrails_ref:
+        description: >-
+          platform-guardrails commit whose scripts and policies this run uses. Pass the
+          same SHA the caller pins in `uses:`, so the reviewed workflow and the scripts it
+          runs match. Empty falls back to the default branch (pre-v1.5.0 behavior).
+        type: string
+        default: ""
       terraform_dir:
         description: Directory holding the root Terraform module.
         type: string
@@ -49,12 +56,13 @@ jobs:
     name: Allocation policy (conftest)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Fetch shared policies
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
         with:
           repository: jordann6/platform-guardrails
+          ref: ${{ inputs.guardrails_ref }}
           path: .guardrails-src
 
       - name: Install conftest
@@ -82,10 +90,10 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request'
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Setup Infracost
-        uses: infracost/actions/setup@v3
+        uses: infracost/actions/setup@e9d6e6cd65e168e76b0de50ff9957d2fe8bb1832 # v3.0.1
         with:
           api-key: ${{ secrets.INFRACOST_API_KEY }}
 

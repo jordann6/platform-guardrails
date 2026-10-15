@@ -18,7 +18,7 @@ jobs:
     name: Policy fixtures
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Install conftest
         run: |
@@ -52,7 +52,7 @@ jobs:
     name: Destroy guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Safe plan is allowed
         run: scripts/destroy-guard.sh examples/plans/safe-plan.json
@@ -74,7 +74,7 @@ jobs:
     name: Hourly guard
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
       - name: Clean state is allowed
         run: scripts/hourly-guard.sh examples/state/clean.txt
@@ -91,5 +91,5 @@ jobs:
     name: Shellcheck
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: shellcheck scripts/*.sh install.sh

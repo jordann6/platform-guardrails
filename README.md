@@ -64,9 +64,30 @@ with OIDC only, per cloud:
 Each auth step self-skips when its inputs are empty, so a caller passes only
 its own cloud's values.
 
+## Versioning and pinning
+
+Pin callers to a full commit SHA, with the tag in a comment, and pass the same SHA
+as `guardrails_ref`:
+
+```yaml
+    uses: jordann6/platform-guardrails/.github/workflows/tf-ci.yml@<commit-sha> # v1.5.0
+    with:
+      guardrails_ref: <commit-sha>
+```
+
+- Tags can be moved; commits cannot. The floating `v1` tag is stale and is no
+  longer updated.
+- `tf-ci.yml`, `tf-plan.yml`, `tf-apply.yml`, `tf-destroy.yml` and
+  `finops-gate.yml` check out this repository's scripts and policies at run time.
+  `guardrails_ref` makes that checkout use the reviewed commit. Left empty, it
+  falls back to the default branch, which was the only behavior before v1.5.0.
+- Every third-party action inside these workflows is pinned to a commit SHA with
+  its version in a comment.
+- `install.sh` writes callers pinned this way (see below).
+
 ## Using it in a repo
 
-### ci.yml — general purpose (recommended for most repos)
+### ci.yml: general purpose (recommended for most repos)
 
 Auto-detects stack and runs appropriate gates. SARIF upload puts findings in the
 GitHub Security tab.
@@ -77,7 +98,7 @@ name: CI
 on: [push, pull_request]
 jobs:
   ci:
-    uses: jordann6/platform-guardrails/.github/workflows/ci.yml@v1
+    uses: jordann6/platform-guardrails/.github/workflows/ci.yml@<commit-sha> # v1.5.0
     permissions:
       contents: read
       security-events: write
@@ -88,7 +109,7 @@ jobs:
     #   enforce_container: true
 ```
 
-### tf-ci.yml — Terraform with stricter gates
+### tf-ci.yml: Terraform with stricter gates
 
 ```yaml
 # .github/workflows/guardrails.yml
@@ -98,17 +119,24 @@ permissions:
   contents: read
 jobs:
   static:
-    uses: jordann6/platform-guardrails/.github/workflows/tf-ci.yml@v1
+    uses: jordann6/platform-guardrails/.github/workflows/tf-ci.yml@<commit-sha> # v1.5.0
     with:
       terraform_dir: terraform
+      guardrails_ref: <commit-sha>
 ```
 
 Or run the installer, which also drops in the pre-commit config, PR template,
 ADR scaffold, and gitignore entries:
 
 ```bash
-./install.sh /path/to/repo terraform
+./install.sh /path/to/repo terraform                    # pins to this checkout's HEAD
+./install.sh --ref <commit-sha> /path/to/repo terraform # pins to an explicit commit
+./install.sh --no-terraform /path/to/app-repo           # application repo: ci.yml caller
 ```
+
+`--no-terraform` is for application repositories whose infrastructure lives in a
+separate infrastructure repository. The caller runs `ci.yml` (full-history secret
+scan plus detected language and container gates) instead of `tf-ci.yml`.
 
 Adopting a repo that already has findings: generate a Checkov baseline so the
 gate blocks *new* problems without blocking the adoption commit, then ratchet it
@@ -146,7 +174,7 @@ the role exists, add this job to the repo's `guardrails.yml`:
       contents: read
       id-token: write
       pull-requests: write
-    uses: jordann6/platform-guardrails/.github/workflows/tf-plan.yml@v1
+    uses: jordann6/platform-guardrails/.github/workflows/tf-plan.yml@<commit-sha> # v1.5.0
     with:
       terraform_dir: terraform
       aws_role_arn: arn:aws:iam::111111111111:role/gha-plan
@@ -184,7 +212,7 @@ mutate. Two roles, by design.
 
 ```yaml
   apply:
-    uses: jordann6/platform-guardrails/.github/workflows/tf-apply.yml@v1.3.0
+    uses: jordann6/platform-guardrails/.github/workflows/tf-apply.yml@<commit-sha> # v1.5.0
     with:
       terraform_dir: terraform
       environment: prod-apply          # must have a required reviewer
@@ -209,7 +237,7 @@ on:
     - cron: "0 * * * *"   # hourly: is anything billable still up?
 jobs:
   ttl:
-    uses: jordann6/platform-guardrails/.github/workflows/tf-destroy.yml@v1.3.0
+    uses: jordann6/platform-guardrails/.github/workflows/tf-destroy.yml@<commit-sha> # v1.5.0
     with:
       terraform_dir: terraform
       aws_role_arn: arn:aws:iam::111111111111:role/gha-plan

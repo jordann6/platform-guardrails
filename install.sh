@@ -3,21 +3,66 @@
 # install.sh — wire an existing repo to the shared guardrails.
 #
 # Usage:
-#   ./install.sh /path/to/target-repo [terraform_dir]
+#   ./install.sh [--ref <commit>] [--no-terraform] /path/to/target-repo [terraform_dir]
 #
 # Copies the local hook config, gitignore additions, PR template and ADR
 # scaffold into the target repo, and drops in a caller workflow that points at
 # the reusable workflows here. Existing files are never overwritten silently.
+#
+#   --ref <commit>   Commit the caller pins in `uses:` and passes as
+#                    guardrails_ref. Defaults to this checkout's HEAD. A full
+#                    SHA is required: tags can move, commits cannot.
+#   --no-terraform   For application repos with no Terraform root: the caller
+#                    runs ci.yml (secret scan plus stack detection) instead of
+#                    tf-ci.yml. Their infrastructure lives in its owning repo.
 
 set -euo pipefail
 
 SRC="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-TARGET="${1:-}"
-TF_DIR="${2:-terraform}"
+REF=""
+NO_TERRAFORM=0
+POSITIONAL=()
+while [[ $# -gt 0 ]]; do
+	case "$1" in
+	--ref)
+		REF="${2:-}"
+		shift 2
+		;;
+	--no-terraform)
+		NO_TERRAFORM=1
+		shift
+		;;
+	-h | --help)
+		sed -n '2,20p' "$0"
+		exit 0
+		;;
+	*)
+		POSITIONAL+=("$1")
+		shift
+		;;
+	esac
+done
+TARGET="${POSITIONAL[0]:-}"
+TF_DIR="${POSITIONAL[1]:-terraform}"
 
 if [[ -z "$TARGET" ]]; then
-	echo "usage: $0 /path/to/target-repo [terraform_dir]" >&2
+	echo "usage: $0 [--ref <commit>] [--no-terraform] /path/to/target-repo [terraform_dir]" >&2
 	exit 2
+fi
+
+if [[ -z "$REF" ]]; then
+	REF="$(git -C "$SRC" rev-parse HEAD)"
+	if [[ -n "$(git -C "$SRC" status --porcelain)" ]]; then
+		echo "install: warning: $SRC has uncommitted changes; the pinned commit will not include them" >&2
+	fi
+fi
+if [[ ! "$REF" =~ ^[0-9a-f]{40}$ ]]; then
+	echo "install: --ref must be a full 40-character commit SHA, got '$REF'" >&2
+	exit 2
+fi
+REF_LABEL="$(git -C "$SRC" describe --tags --exact-match "$REF" 2>/dev/null || echo "untagged ${REF:0:12}")"
+if ! git -C "$SRC" branch -r --contains "$REF" 2>/dev/null | grep -q .; then
+	echo "install: warning: $REF is not on any remote branch yet; push it before the caller runs" >&2
 fi
 
 if [[ ! -d "$TARGET/.git" ]]; then
@@ -36,19 +81,25 @@ copy_if_absent() {
 	echo "  add    ${dst#"$TARGET"/}"
 }
 
-echo "Installing guardrails into $TARGET (terraform_dir=$TF_DIR)"
+if [[ $NO_TERRAFORM -eq 1 ]]; then
+	echo "Installing guardrails into $TARGET (no Terraform, pinned to $REF_LABEL)"
+	TEMPLATE="$SRC/templates/caller-workflow-app.yml"
+else
+	echo "Installing guardrails into $TARGET (terraform_dir=$TF_DIR, pinned to $REF_LABEL)"
+	TEMPLATE="$SRC/templates/caller-workflow.yml"
+fi
 
 copy_if_absent "$SRC/templates/.pre-commit-config.yaml" "$TARGET/.pre-commit-config.yaml"
 copy_if_absent "$SRC/templates/PULL_REQUEST_TEMPLATE.md" "$TARGET/.github/PULL_REQUEST_TEMPLATE.md"
 copy_if_absent "$SRC/templates/adr-0000-template.md" "$TARGET/docs/adr/0000-template.md"
 
-# Caller workflow, with the terraform directory substituted in.
+# Caller workflow, with the pinned commit and terraform directory substituted in.
 workflow="$TARGET/.github/workflows/guardrails.yml"
 if [[ -e "$workflow" ]]; then
 	echo "  skip   .github/workflows/guardrails.yml (already exists)"
 else
 	mkdir -p "$(dirname "$workflow")"
-	sed "s|__TF_DIR__|$TF_DIR|g" "$SRC/templates/caller-workflow.yml" >"$workflow"
+	sed -e "s|__TF_DIR__|$TF_DIR|g" -e "s|__REF__|$REF|g" -e "s|__REF_LABEL__|$REF_LABEL|g" "$TEMPLATE" >"$workflow"
 	echo "  add    .github/workflows/guardrails.yml"
 fi
 
@@ -70,6 +121,21 @@ if [[ $added -eq 1 ]]; then
 	echo "  update .gitignore"
 else
 	echo "  skip   .gitignore (nothing to add)"
+fi
+
+if [[ $NO_TERRAFORM -eq 1 ]]; then
+	cat <<EOF
+
+Done. Remaining manual steps:
+
+  1. cd $TARGET && pre-commit install
+  2. The caller runs ci.yml: gitleaks over full history plus the language and
+     container gates it detects. If the repo builds its own image or runs its
+     own SAST, set skip_container and keep those gates in the repo's pipeline.
+  3. Infrastructure for this application belongs in its owning repository and
+     runs through tf-ci.yml / tf-apply.yml there.
+EOF
+	exit 0
 fi
 
 cat <<EOF
