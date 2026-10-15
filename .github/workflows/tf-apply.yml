@@ -77,6 +77,13 @@ on:
         description: contract_version written into the document.
         type: string
         default: "1"
+      skip_apply_when_unchanged:
+        description: >-
+          Skip the gated apply job when the plan is empty, so no reviewer is asked to
+          approve a no-op. Off by default to keep the pre-v1.7.0 behavior (an unchanged
+          apply still republishes the contract).
+        type: boolean
+        default: false
     outputs:
       contract_parameter:
         description: SSM parameter the contract was published to, when publishing is enabled.
@@ -84,6 +91,9 @@ on:
       generation_id:
         description: generation_id from the published contract, when the root outputs one.
         value: ${{ jobs.apply.outputs.generation_id }}
+      has_changes:
+        description: '"true" when the reviewed plan had changes, "false" when it was empty.'
+        value: ${{ jobs.plan.outputs.has_changes }}
 
 permissions:
   contents: read
@@ -95,6 +105,13 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    # See tf-plan.yml: lets a root pick its plan-stage identity from an ephemeral
+    # `ci_stage` variable. Ephemeral values are not stored in the saved plan, so
+    # the apply job below supplies its own stage when it replays the plan.
+    env:
+      TF_VAR_ci_stage: plan
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -127,10 +144,20 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
 
+      # -detailed-exitcode: 0 is an empty plan, 2 is a plan with changes, 1 is an error.
       - name: Plan
+        id: plan
         run: |
           terraform -chdir=${{ inputs.terraform_dir }} init
-          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false
+          set +e
+          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false -detailed-exitcode
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
+          esac
           terraform -chdir=${{ inputs.terraform_dir }} show -json tfplan \
             > "${{ inputs.terraform_dir }}/plan.json"
 
@@ -175,11 +202,16 @@ jobs:
   apply:
     name: Apply (gated)
     needs: plan
+    # An empty plan has nothing to approve. Skipping the job (opt-in) means no
+    # reviewer is paged for a no-op and nothing is replayed.
+    if: ${{ !inputs.skip_apply_when_unchanged || needs.plan.outputs.has_changes == 'true' }}
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
     permissions:
       contents: read
       id-token: write
+    env:
+      TF_VAR_ci_stage: apply
     outputs:
       contract_parameter: ${{ steps.contract.outputs.contract_parameter }}
       generation_id: ${{ steps.contract.outputs.generation_id }}

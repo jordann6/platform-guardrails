@@ -134,15 +134,20 @@ jobs:
           echo "TTL guard clean: nothing hourly is standing."
 
       # Destroy: either an explicit teardown, or a tripped TTL guard set to act.
+      # TF_VAR_ci_stage: see tf-plan.yml. Destroy writes, so a root maps this stage
+      # to its write-scoped identity.
       - name: Destroy
         if: ${{ !inputs.check_only || (inputs.check_only && inputs.auto_destroy && steps.inspect.outputs.standing == 'true') }}
+        env:
+          TF_VAR_ci_stage: destroy
         run: terraform -chdir=${{ inputs.terraform_dir }} destroy -auto-approve -input=false
 
-      # Post-destroy verification (section 8): prove nothing hourly survived.
+      # Post-destroy verification (section 8): prove nothing hourly survived. No
+      # `|| true` here: an unreadable state must fail the check, not read as empty.
       - name: Verify teardown
         if: ${{ !inputs.check_only || (inputs.check_only && inputs.auto_destroy && steps.inspect.outputs.standing == 'true') }}
         run: |
-          terraform -chdir=${{ inputs.terraform_dir }} state list > /tmp/state-after.txt || true
+          terraform -chdir=${{ inputs.terraform_dir }} state list > /tmp/state-after.txt
           if ! .guardrails-src/scripts/hourly-guard.sh /tmp/state-after.txt; then
             echo "::error::Destroy completed but hourly resources remain in state. Check the teardown traps."
             exit 1
