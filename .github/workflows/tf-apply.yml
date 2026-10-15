@@ -62,6 +62,28 @@ on:
         description: Write-scoped GCP service account impersonated for the apply. Its WIF binding should be conditioned on the environment claim so only the gated job can reach it.
         type: string
         default: ""
+      contract_parameter:
+        description: >-
+          SSM parameter to publish the deployment contract to after a successful apply
+          (scripts/publish-contract.sh). Empty disables publishing. The apply role needs
+          ssm:PutParameter on it.
+        type: string
+        default: ""
+      contract_allowlist:
+        description: Allowlist of output names to publish, relative to terraform_dir.
+        type: string
+        default: contract-allowlist.txt
+      contract_version:
+        description: contract_version written into the document.
+        type: string
+        default: "1"
+    outputs:
+      contract_parameter:
+        description: SSM parameter the contract was published to, when publishing is enabled.
+        value: ${{ jobs.apply.outputs.contract_parameter }}
+      generation_id:
+        description: generation_id from the published contract, when the root outputs one.
+        value: ${{ jobs.apply.outputs.generation_id }}
 
 permissions:
   contents: read
@@ -158,8 +180,19 @@ jobs:
     permissions:
       contents: read
       id-token: write
+    outputs:
+      contract_parameter: ${{ steps.contract.outputs.contract_parameter }}
+      generation_id: ${{ steps.contract.outputs.generation_id }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Checkout guardrail scripts
+        if: inputs.contract_parameter != ''
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: jordann6/platform-guardrails
+          ref: ${{ inputs.guardrails_ref }}
+          path: .guardrails-src
 
       - name: Download plan
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
@@ -195,3 +228,14 @@ jobs:
         run: |
           terraform -chdir=${{ inputs.terraform_dir }} init
           terraform -chdir=${{ inputs.terraform_dir }} apply -input=false tfplan
+
+      # Explicit output handoff: application pipelines read this allowlisted
+      # document instead of Terraform state or duplicated resource names.
+      - name: Publish deployment contract
+        id: contract
+        if: inputs.contract_parameter != ''
+        run: |
+          .guardrails-src/scripts/publish-contract.sh "${{ inputs.terraform_dir }}" \
+            "${{ inputs.contract_parameter }}" \
+            "${{ inputs.terraform_dir }}/${{ inputs.contract_allowlist }}" \
+            "${{ inputs.contract_version }}"
