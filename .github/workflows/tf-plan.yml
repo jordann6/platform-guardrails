@@ -100,9 +100,12 @@ jobs:
           workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
           service_account: ${{ inputs.gcp_service_account }}
 
+      # No wrapper: it reports exit code 2 (a plan with changes) as success and
+      # exits 0, which would hide -detailed-exitcode from the Plan step below.
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:
           terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
 
       # -detailed-exitcode: 0 is an empty plan, 2 is a plan with changes, 1 is an error.
       - name: Plan

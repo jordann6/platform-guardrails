@@ -100,3 +100,46 @@ jobs:
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: scripts/tests/publish-contract.test.sh
+
+  # tf-plan and tf-apply report has_changes from `plan -detailed-exitcode`. The
+  # setup-terraform wrapper turns exit code 2 into 0, which made every plan read
+  # as empty and skipped every gated apply (fixed in v1.7.1). Prove both halves:
+  # the callables disable the wrapper, and with it disabled the codes come through.
+  detailed_exitcode:
+    name: Detailed exit code
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Callables that use -detailed-exitcode disable the wrapper
+        run: |
+          status=0
+          while IFS= read -r f; do
+            uses=$(grep -c 'hashicorp/setup-terraform@' "$f")
+            off=$(grep -c 'terraform_wrapper: false' "$f")
+            echo "$f: setup-terraform=$uses wrapper-off=$off"
+            # tf-apply has two setup steps; only its plan job needs the exit code.
+            if [ "$off" -lt 1 ]; then
+              echo "::error::$f plans with -detailed-exitcode but leaves the setup-terraform wrapper on."
+              status=1
+            fi
+          done < <(grep -l -- '-detailed-exitcode' .github/workflows/tf-*.yml)
+          exit $status
+
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: 1.11.3
+          terraform_wrapper: false
+
+      - name: A plan with changes exits 2, an empty plan exits 0
+        run: |
+          mkdir -p "$RUNNER_TEMP/exitcode" && cd "$RUNNER_TEMP/exitcode"
+          echo 'resource "terraform_data" "probe" {}' > main.tf
+          terraform init -input=false >/dev/null
+          set +e
+          terraform plan -input=false -detailed-exitcode >/dev/null; changes=$?
+          terraform apply -input=false -auto-approve >/dev/null
+          terraform plan -input=false -detailed-exitcode >/dev/null; empty=$?
+          set -e
+          echo "with changes: $changes (want 2), empty: $empty (want 0)"
+          [ "$changes" -eq 2 ] && [ "$empty" -eq 0 ]
