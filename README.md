@@ -244,6 +244,52 @@ jobs:
       check_only: true
 ```
 
+### Roots that assume into other accounts (v1.7.0)
+
+A root whose provider does `assume_role` into a member account has a problem the
+saved plan creates: input variables and data sources are frozen into the plan, so
+whatever role the plan job picked is the role the apply job replays with. Pick a
+read-only member role and the apply fails; pick a write role and the plan job can
+write.
+
+Every credentialed job therefore exports `TF_VAR_ci_stage` (`plan` in tf-plan and
+the tf-apply plan job, `apply` in the gated apply job, `destroy` for a teardown).
+Declare it **ephemeral** in the root, so Terraform does not store it in the plan and
+the apply job's own value is the one the provider sees:
+
+```hcl
+variable "ci_stage" {
+  type      = string
+  default   = ""
+  ephemeral = true # Terraform 1.10 or later
+}
+
+locals {
+  member_role = {
+    plan    = "gha-plan"
+    apply   = "gha-apply"
+    destroy = "gha-apply"
+  }
+}
+
+provider "aws" {
+  assume_role {
+    role_arn = "arn:aws:iam::${var.member_account_id}:role/${lookup(local.member_role, var.ci_stage, "OrganizationAccountAccessRole")}"
+  }
+}
+```
+
+The variable only selects; IAM enforces. Trust the member read role only from the
+plan role and the member write role only from the environment-gated apply role, so
+a pull request that edits the mapping still cannot reach a write role. Roots that
+do not declare `ci_stage` ignore it.
+
+Two more outputs from v1.7.0: `tf-plan.yml` and `tf-apply.yml` expose
+`has_changes` (from `-detailed-exitcode`). A caller that re-plans right after an
+apply can assert `has_changes == 'false'`, which catches a perpetual diff the day
+it is introduced. `tf-apply.yml` also takes `skip_apply_when_unchanged: true`, so an
+empty plan does not page a reviewer to approve a no-op.
+
 What counts as "hourly" is `scripts/hourly-guard.sh`: NAT gateways, managed
 firewalls, VPC/private endpoints, managed databases, k8s control planes, load
 balancers, VMs, and their Azure/GCP equivalents. KMS keys, empty backup vaults,

@@ -46,6 +46,13 @@ on:
     secrets:
       INFRACOST_API_KEY:
         required: false
+    outputs:
+      has_changes:
+        description: >-
+          "true" when the plan would change resources or outputs, "false" when it is
+          empty. A caller re-planning right after an apply asserts "false", which is
+          the perpetual-diff check.
+        value: ${{ jobs.plan.outputs.has_changes }}
 
 permissions:
   contents: read
@@ -57,6 +64,14 @@ jobs:
     name: Plan + destroy guard
     runs-on: ubuntu-latest
     environment: ${{ inputs.environment }}
+    outputs:
+      has_changes: ${{ steps.plan.outputs.has_changes }}
+    # Exported to every step so a root can declare an ephemeral `ci_stage`
+    # variable and pick a stage-specific identity (for example a read-only role in
+    # a member account) in its provider configuration. Roots that do not declare
+    # it ignore it: Terraform skips TF_VAR_ values for undeclared variables.
+    env:
+      TF_VAR_ci_stage: plan
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -89,10 +104,20 @@ jobs:
         with:
           terraform_version: ${{ inputs.terraform_version }}
 
+      # -detailed-exitcode: 0 is an empty plan, 2 is a plan with changes, 1 is an error.
       - name: Plan
+        id: plan
         run: |
           terraform -chdir=${{ inputs.terraform_dir }} init
-          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false
+          set +e
+          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false -detailed-exitcode
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "has_changes=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "has_changes=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
+          esac
           terraform -chdir=${{ inputs.terraform_dir }} show -json tfplan \
             > "${{ inputs.terraform_dir }}/plan.json"
 
