@@ -251,6 +251,35 @@ secrets, and log groups are deliberately excluded: they are the ~$1-3/mo standin
 footprint the design lets survive a destroy. Override the list per repo with
 `.guardrails/hourly-types.txt`.
 
+## Handing outputs to application pipelines
+
+Application pipelines should never read Terraform state, and should not repeat
+resource names that infrastructure owns. After a successful apply, `tf-apply.yml`
+can publish an allowlisted deployment contract to SSM:
+
+```yaml
+    uses: jordann6/platform-guardrails/.github/workflows/tf-apply.yml@<commit-sha> # v1.6.0
+    with:
+      terraform_dir: delivery
+      environment: prod-apply
+      apply_role_arn: arn:aws:iam::<account>:role/<apply-role>
+      contract_parameter: /delivery/<app>/prod/contract
+      contract_allowlist: contract-allowlist.txt   # relative to terraform_dir
+      guardrails_ref: <commit-sha>
+```
+
+- Only output names listed in the allowlist are published. A listed output that is
+  missing or null fails the step and nothing is written.
+- The document adds `contract_version`, `source_commit` and `published_at`. The
+  workflow exposes `contract_parameter` and `generation_id` as outputs.
+- `tf-destroy.yml` takes the same `contract_parameter` and deletes it after a
+  destroy, so a contract never outlives its environment.
+- Operators who apply locally run the same script:
+  `scripts/publish-contract.sh <terraform_dir> <parameter> <allowlist>`.
+
+Consumers should validate the document and compare a generation identifier against
+a tag on a live resource, so a contract from a previous environment is rejected.
+
 ## Local use
 
 ```bash

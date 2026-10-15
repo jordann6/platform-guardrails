@@ -52,6 +52,10 @@ on:
         description: GCP service account to impersonate through the WIF provider. Needs destroy rights unless check_only. Empty for non-GCP.
         type: string
         default: ""
+      contract_parameter:
+        description: SSM deployment contract to delete after a successful destroy. Empty skips it.
+        type: string
+        default: ""
       check_only:
         description: TTL guard mode. Only report standing hourly resources; do not destroy.
         type: boolean
@@ -144,3 +148,8 @@ jobs:
             exit 1
           fi
           echo "Teardown verified: no hourly-billed resources remain."
+
+      # A destroyed environment must not leave a contract that names it.
+      - name: Delete deployment contract
+        if: ${{ inputs.contract_parameter != '' && (!inputs.check_only || (inputs.check_only && inputs.auto_destroy && steps.inspect.outputs.standing == 'true')) }}
+        run: .guardrails-src/scripts/publish-contract.sh --delete "${{ inputs.contract_parameter }}"
