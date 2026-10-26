@@ -1,0 +1,222 @@
+name: Terraform Drift Detection (scheduled)
+
+# Reusable workflow that asks one question on a schedule: does the real
+# infrastructure still match Terraform state? A gated apply proves the code and
+# the cloud agree at merge time. It says nothing about the console change made
+# at 2am, the policy someone loosened by hand, or the resource another tool
+# rewrote. Those only show up at the next plan, if anyone runs one.
+#
+#   plan -refresh-only -detailed-exitcode
+#     0  no drift
+#     2  real infrastructure differs from state (drift)
+#     1  error
+#
+# -refresh-only isolates out-of-band changes from unapplied code: a merged PR
+# waiting on its apply is not drift, and this does not report it as drift.
+#
+# On drift it opens (or updates) one issue per root, labeled `drift`, listing
+# each drifted resource and which attributes changed. When a later run is
+# clean, it closes that issue with a comment, so the issue list is the current
+# drift, not a history of it.
+#
+# Read-only by design. It runs with -lock=false, so a scheduled check never
+# holds the state lock against a real apply, and it never writes state. Pass a
+# read-scoped identity. Wire it in the caller with `on: schedule`.
+
+on:
+  workflow_call:
+    inputs:
+      guardrails_ref:
+        description: >-
+          platform-guardrails commit whose scripts this run uses. Pass the same SHA
+          the caller pins in `uses:`. Empty falls back to the default branch.
+        type: string
+        default: ""
+      terraform_dir:
+        type: string
+        default: terraform
+      terraform_version:
+        type: string
+        default: 1.11.3
+      fail_on_drift:
+        description: Also fail the run on drift, so the red scheduled run is an alarm alongside the issue.
+        type: boolean
+        default: true
+      aws_role_arn:
+        description: Read-scoped role assumed via OIDC. Empty for non-AWS.
+        type: string
+        default: ""
+      aws_region:
+        type: string
+        default: us-east-1
+      gcp_workload_identity_provider:
+        description: GCP Workload Identity Federation provider resource name. Empty for non-GCP.
+        type: string
+        default: ""
+      gcp_service_account:
+        description: Read-scoped GCP service account impersonated through the WIF provider. Empty for non-GCP.
+        type: string
+        default: ""
+      azure_client_id:
+        description: Client ID of a read-scoped Azure identity with a federated credential for this repo. Empty for non-Azure.
+        type: string
+        default: ""
+      azure_tenant_id:
+        type: string
+        default: ""
+      azure_subscription_id:
+        type: string
+        default: ""
+    outputs:
+      drifted:
+        description: '"true" when real infrastructure differs from state.'
+        value: ${{ jobs.drift.outputs.drifted }}
+
+permissions:
+  contents: read
+
+jobs:
+  drift:
+    name: Drift check (${{ inputs.terraform_dir }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+      issues: write
+    outputs:
+      drifted: ${{ steps.refresh.outputs.drifted }}
+    env:
+      TF_VAR_ci_stage: plan
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+
+      - name: Fetch guardrail scripts
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: jordann6/platform-guardrails
+          ref: ${{ inputs.guardrails_ref }}
+          path: .guardrails-src
+
+      - name: Configure AWS credentials (OIDC, read-scoped)
+        if: inputs.aws_role_arn != ''
+        uses: aws-actions/configure-aws-credentials@7474bc4690e29a8392af63c5b98e7449536d5c3a # v4.3.1
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+
+      - name: Authenticate to GCP (OIDC via WIF, read-scoped)
+        if: inputs.gcp_workload_identity_provider != ''
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2.1.13
+        with:
+          workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
+          service_account: ${{ inputs.gcp_service_account }}
+
+      - name: Authenticate to Azure (OIDC, read-scoped)
+        if: inputs.azure_client_id != ''
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+
+      - name: Point Terraform at the Azure federated identity
+        if: inputs.azure_client_id != ''
+        env:
+          CLIENT_ID: ${{ inputs.azure_client_id }}
+          TENANT_ID: ${{ inputs.azure_tenant_id }}
+          SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
+        run: |
+          {
+            echo "ARM_USE_OIDC=true"
+            echo "ARM_USE_AZUREAD=true"
+            echo "ARM_CLIENT_ID=${CLIENT_ID}"
+            echo "ARM_TENANT_ID=${TENANT_ID}"
+            echo "ARM_SUBSCRIPTION_ID=${SUBSCRIPTION_ID}"
+          } >> "$GITHUB_ENV"
+
+      # No wrapper: it reports exit code 2 as success and would hide drift.
+      - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
+        with:
+          terraform_version: ${{ inputs.terraform_version }}
+          terraform_wrapper: false
+
+      - name: Refresh-only plan
+        id: refresh
+        env:
+          DIR: ${{ inputs.terraform_dir }}
+        run: |
+          terraform -chdir="$DIR" init -input=false
+          set +e
+          terraform -chdir="$DIR" plan -refresh-only -lock=false -input=false \
+            -detailed-exitcode -out=drift.tfplan
+          code=$?
+          set -e
+          case "$code" in
+            0) echo "drifted=false" >> "$GITHUB_OUTPUT" ;;
+            2) echo "drifted=true" >> "$GITHUB_OUTPUT" ;;
+            *) exit "$code" ;;
+          esac
+          terraform -chdir="$DIR" show -json drift.tfplan > /tmp/drift.json
+
+      # scripts/drift-summary.sh names the attributes that changed rather than
+      # dumping values, which can include secrets.
+      - name: Summarise drift
+        id: summary
+        if: steps.refresh.outputs.drifted == 'true'
+        run: |
+          chmod +x .guardrails-src/scripts/drift-summary.sh
+          .guardrails-src/scripts/drift-summary.sh /tmp/drift.json > /tmp/drift.md
+          count=$(grep -c '^- ' /tmp/drift.md || true)
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Drift in \`${{ inputs.terraform_dir }}\`: ${count} resource(s)"
+            echo ""
+            cat /tmp/drift.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Open or update the drift issue
+        if: steps.refresh.outputs.drifted == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIR: ${{ inputs.terraform_dir }}
+          COUNT: ${{ steps.summary.outputs.count }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Drift detected in ${DIR}"
+          {
+            echo "Real infrastructure no longer matches Terraform state in \`${DIR}\`: ${COUNT} resource(s)."
+            echo ""
+            cat /tmp/drift.md
+            echo ""
+            echo "Detected by [this run](${RUN_URL}) (\`plan -refresh-only\`)."
+            echo ""
+            echo "Resolve by either reverting the change in the cloud, or codifying it and applying through the gated pipeline. This issue closes itself on the next clean check."
+          } > /tmp/body.md
+          gh label create drift --color B60205 --description "Infrastructure differs from Terraform state" 2>/dev/null || true
+          existing=$(gh issue list --state open --label drift --search "in:title \"${title}\"" --json number --jq '.[0].number // empty')
+          if [ -n "$existing" ]; then
+            gh issue edit "$existing" --body-file /tmp/body.md
+            gh issue comment "$existing" --body "Still drifted as of [this run](${RUN_URL})."
+          else
+            gh issue create --title "$title" --label drift --body-file /tmp/body.md
+          fi
+
+      - name: Close the drift issue when clean
+        if: steps.refresh.outputs.drifted == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          DIR: ${{ inputs.terraform_dir }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Drift detected in ${DIR}"
+          existing=$(gh issue list --state open --label drift --search "in:title \"${title}\"" --json number --jq '.[0].number // empty' 2>/dev/null || true)
+          if [ -n "$existing" ]; then
+            gh issue close "$existing" --comment "No drift as of [this run](${RUN_URL}). Closing."
+          fi
+          echo "No drift in ${DIR}."
+
+      - name: Fail on drift
+        if: steps.refresh.outputs.drifted == 'true' && inputs.fail_on_drift
+        run: |
+          echo "::error::Drift detected in ${{ inputs.terraform_dir }}. See the drift issue."
+          exit 1

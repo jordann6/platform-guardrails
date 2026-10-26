@@ -1,0 +1,32 @@
+{
+  "format_version": "1.2",
+  "resource_drift": [
+    {
+      "address": "azurerm_network_security_group.spoke",
+      "type": "azurerm_network_security_group",
+      "change": {
+        "actions": ["update"],
+        "before": {"name": "nsg-spoke", "tags": {"owner": "platform"}, "security_rule": []},
+        "after": {"name": "nsg-spoke", "tags": {"owner": "platform"}, "security_rule": [{"name": "allow-rdp", "destination_port_range": "3389"}]}
+      }
+    },
+    {
+      "address": "aws_s3_bucket.logs",
+      "type": "aws_s3_bucket",
+      "change": {
+        "actions": ["delete"],
+        "before": {"bucket": "logs"},
+        "after": null
+      }
+    },
+    {
+      "address": "google_secret_manager_secret_version.db",
+      "type": "google_secret_manager_secret_version",
+      "change": {
+        "actions": ["update"],
+        "before": {"secret_data": "old-value-must-not-print", "enabled": true},
+        "after": {"secret_data": "new-value-must-not-print", "enabled": true}
+      }
+    }
+  ]
+}
