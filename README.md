@@ -251,10 +251,22 @@ managed identities or app registrations), each with its own federated credential
 
 | Identity | Federated credential subject | Role |
 |---|---|---|
-| plan | `repo:OWNER/REPO:pull_request` and `repo:OWNER/REPO:ref:refs/heads/main` | Reader on the target scope, Storage Blob Data Contributor on the state container (the plan takes a blob lease) |
-| apply | `repo:OWNER/REPO:environment:prod-apply` only | Write on the target scope |
+| plan | `PREFIX:pull_request` and `PREFIX:ref:refs/heads/main` | Reader on the target scope, Storage Blob Data Contributor on the state container (the plan takes a blob lease) |
+| apply | `PREFIX:environment:prod-apply`, plus `PREFIX:environment:destroy` if `tf-destroy.yml` uses it | Write on the target scope |
 
-The apply identity trusts only the environment subject. A workflow edited to drop
+`PREFIX` is whatever GitHub puts on the repo's tokens. Repos now default to the
+immutable form, `repo:OWNER@OWNER_ID/REPO@REPO_ID`; read it with
+`gh api repos/OWNER/REPO/actions/oidc/customization/sub`. Entra matches the subject
+exactly, with no wildcard, so a credential written as `repo:OWNER/REPO:...` fails
+with `AADSTS700213` against an immutable-subject token.
+
+To keep pull requests from touching other roots' state, put an ABAC condition on
+the Storage Blob Data Contributor assignment that limits write, delete and lease
+to the CI root's state blob. [azure-landing-zone](https://github.com/jordann6/azure-landing-zone#ci)
+does this, and proved the path live on 2026-10-26: gated apply, gated destroy, and
+the TTL guard.
+
+The apply identity trusts only environment subjects. A workflow edited to drop
 `environment:` gets a token whose subject is the branch, which that identity
 rejects, so the reviewer gate cannot be skipped by editing YAML. This is the same
 property the GCP path gets from conditioning the apply service account's WIF
@@ -264,8 +276,9 @@ variables the workflows export).
 
 ```yaml
   apply:
-    uses: jordann6/platform-guardrails/.github/workflows/tf-apply.yml@<commit-sha> # v1.8.0
+    uses: jordann6/platform-guardrails/.github/workflows/tf-apply.yml@<commit-sha> # v1.8.1
     with:
+      guardrails_ref: <commit-sha>
       terraform_dir: workload
       environment: prod-apply
       azure_plan_client_id:  ${{ vars.AZURE_PLAN_CLIENT_ID }}
@@ -419,9 +432,12 @@ no policy, because it still looks green.
 
 ## What this deliberately does not do
 
-It does not auto-remediate, and it does not gate on cost. Drift detection
-reports drift; it never reverts it, because the drifted value is sometimes the
-emergency fix that should be codified, not undone. Infracost comments,
-it does not block, because a threshold that fires on legitimate growth gets
-ignored within a month. The judgment stays with the reviewer; the tooling just
+It does not auto-remediate, and it does not gate on cost by default. Drift
+detection reports drift; it never reverts it, because the drifted value is
+sometimes the emergency fix that should be codified, not undone. In `tf-plan.yml`
+Infracost comments and does not block, because a threshold that fires on
+legitimate growth gets ignored within a month. Repos that want a hard cost gate
+opt in to `finops-gate.yml`, which fails a PR whose projected monthly increase
+exceeds `max_monthly_increase` (default $50) unless it carries a `cost-approved`
+label. The judgment stays with the reviewer; the tooling just
 makes sure the reviewer is looking at the right three lines.
