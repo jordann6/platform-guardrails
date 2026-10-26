@@ -67,6 +67,13 @@ on:
       azure_subscription_id:
         type: string
         default: ""
+    secrets:
+      TF_VARS:
+        description: >-
+          Contents of a tfvars file for roots with required variables that live in
+          a gitignored terraform.tfvars. Written to the runner's temp dir, never
+          the checkout, and passed with -var-file. Empty for roots that need none.
+        required: false
     outputs:
       drifted:
         description: '"true" when real infrastructure differs from state.'
@@ -144,11 +151,18 @@ jobs:
         id: refresh
         env:
           DIR: ${{ inputs.terraform_dir }}
+          TF_VARS: ${{ secrets.TF_VARS }}
         run: |
           terraform -chdir="$DIR" init -input=false
+          var_file=()
+          if [ -n "$TF_VARS" ]; then
+            umask 077
+            printf '%s\n' "$TF_VARS" > "$RUNNER_TEMP/drift.tfvars"
+            var_file=(-var-file="$RUNNER_TEMP/drift.tfvars")
+          fi
           set +e
           terraform -chdir="$DIR" plan -refresh-only -lock=false -input=false \
-            -detailed-exitcode -out=drift.tfplan
+            -detailed-exitcode "${var_file[@]}" -out=drift.tfplan
           code=$?
           set -e
           case "$code" in

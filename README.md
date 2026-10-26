@@ -345,6 +345,12 @@ It is read-only: it runs with `-lock=false` and never writes state, so a
 scheduled check cannot hold the lock against a real apply. Give it the read-scoped
 identity.
 
+A refresh-only plan still needs every required variable. When a root keeps those
+in a gitignored `terraform.tfvars`, store that file's contents as a repository
+secret and pass it as `TF_VARS`. The job writes it to the runner's temp directory
+(mode 600, outside the checkout) and adds it with `-var-file`; GitHub masks the
+value in logs.
+
 ```yaml
 # .github/workflows/drift.yml
 on:
@@ -360,11 +366,13 @@ jobs:
     strategy:
       matrix:
         root: [terraform, observability]
-    uses: jordann6/platform-guardrails/.github/workflows/tf-drift.yml@<commit-sha> # v1.8.0
+    uses: jordann6/platform-guardrails/.github/workflows/tf-drift.yml@<commit-sha> # v1.8.1
     with:
       guardrails_ref: <commit-sha>
       terraform_dir: ${{ matrix.root }}
       aws_role_arn: arn:aws:iam::111111111111:role/gha-plan
+    secrets:
+      TF_VARS: ${{ secrets.DRIFT_TFVARS }}   # only if the roots have required variables
 ```
 
 ## Handing outputs to application pipelines
