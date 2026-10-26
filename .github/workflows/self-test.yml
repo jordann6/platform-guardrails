@@ -95,11 +95,12 @@ jobs:
       - run: shellcheck scripts/*.sh scripts/tests/*.sh install.sh
 
   contract:
-    name: Contract publishing
+    name: Script tests (contract publishing, drift summary)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - run: scripts/tests/publish-contract.test.sh
+      - run: scripts/tests/drift-summary.test.sh
 
   # tf-plan and tf-apply report has_changes from `plan -detailed-exitcode`. The
   # setup-terraform wrapper turns exit code 2 into 0, which made every plan read

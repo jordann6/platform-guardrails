@@ -62,6 +62,22 @@ on:
         description: Write-scoped GCP service account impersonated for the apply. Its WIF binding should be conditioned on the environment claim so only the gated job can reach it.
         type: string
         default: ""
+      azure_plan_client_id:
+        description: Client ID of the read-scoped Azure identity for the plan. Its federated credential should trust pull requests and main, not the environment. Empty for non-Azure.
+        type: string
+        default: ""
+      azure_apply_client_id:
+        description: Client ID of the write-scoped Azure identity for the apply. Give it ONE federated credential, with subject repo:OWNER/REPO:environment:ENV, so only the gated job can reach it.
+        type: string
+        default: ""
+      azure_tenant_id:
+        description: Entra tenant ID. Required with Azure client IDs.
+        type: string
+        default: ""
+      azure_subscription_id:
+        description: Subscription the azurerm provider and backend default to. Required with Azure client IDs.
+        type: string
+        default: ""
       contract_parameter:
         description: >-
           SSM parameter to publish the deployment contract to after a successful apply
@@ -152,6 +168,33 @@ jobs:
         with:
           workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
           service_account: ${{ inputs.gcp_plan_service_account }}
+
+      # Azure path, same contract as AWS and GCP: OIDC only, no client secret.
+      # azure/login gives the az CLI a federated token; the ARM_* variables put the
+      # azurerm and azuread providers and the azurerm backend on the same GitHub
+      # token (ARM_USE_OIDC). Nothing long-lived touches the runner.
+      - name: Authenticate to Azure (OIDC, read-scoped)
+        if: inputs.azure_plan_client_id != ''
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure_plan_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+
+      - name: Point Terraform at the Azure federated identity
+        if: inputs.azure_plan_client_id != ''
+        env:
+          CLIENT_ID: ${{ inputs.azure_plan_client_id }}
+          TENANT_ID: ${{ inputs.azure_tenant_id }}
+          SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
+        run: |
+          {
+            echo "ARM_USE_OIDC=true"
+            echo "ARM_USE_AZUREAD=true"
+            echo "ARM_CLIENT_ID=${CLIENT_ID}"
+            echo "ARM_TENANT_ID=${TENANT_ID}"
+            echo "ARM_SUBSCRIPTION_ID=${SUBSCRIPTION_ID}"
+          } >> "$GITHUB_ENV"
 
       # No wrapper: it reports exit code 2 (a plan with changes) as success and
       # exits 0, which would hide -detailed-exitcode from the Plan step below.
@@ -265,6 +308,33 @@ jobs:
         with:
           workload_identity_provider: ${{ inputs.gcp_workload_identity_provider }}
           service_account: ${{ inputs.gcp_apply_service_account }}
+
+      # Azure path, same contract as AWS and GCP: OIDC only, no client secret.
+      # azure/login gives the az CLI a federated token; the ARM_* variables put the
+      # azurerm and azuread providers and the azurerm backend on the same GitHub
+      # token (ARM_USE_OIDC). Nothing long-lived touches the runner.
+      - name: Authenticate to Azure (OIDC, write-scoped)
+        if: inputs.azure_apply_client_id != ''
+        uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ inputs.azure_apply_client_id }}
+          tenant-id: ${{ inputs.azure_tenant_id }}
+          subscription-id: ${{ inputs.azure_subscription_id }}
+
+      - name: Point Terraform at the Azure federated identity
+        if: inputs.azure_apply_client_id != ''
+        env:
+          CLIENT_ID: ${{ inputs.azure_apply_client_id }}
+          TENANT_ID: ${{ inputs.azure_tenant_id }}
+          SUBSCRIPTION_ID: ${{ inputs.azure_subscription_id }}
+        run: |
+          {
+            echo "ARM_USE_OIDC=true"
+            echo "ARM_USE_AZUREAD=true"
+            echo "ARM_CLIENT_ID=${CLIENT_ID}"
+            echo "ARM_TENANT_ID=${TENANT_ID}"
+            echo "ARM_SUBSCRIPTION_ID=${SUBSCRIPTION_ID}"
+          } >> "$GITHUB_ENV"
 
       - uses: hashicorp/setup-terraform@b9cd54a3c349d3f38e8881555d616ced269862dd # v3.1.2
         with:

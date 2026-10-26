@@ -59,7 +59,7 @@ with OIDC only, per cloud:
 |---|---|---|
 | AWS | `aws_role_arn` (plan/destroy), `plan_role_arn` + `apply_role_arn` (apply) | `aws-actions/configure-aws-credentials` |
 | GCP | `gcp_workload_identity_provider` + `gcp_service_account` (plan/destroy), `gcp_plan_service_account` + `gcp_apply_service_account` (apply) | `google-github-actions/auth` through Workload Identity Federation |
-| Azure | not yet | Azure repos run their static gates here and apply locally until an `azure/login` path lands |
+| Azure | `azure_client_id` + `azure_tenant_id` + `azure_subscription_id` (plan/destroy/drift), `azure_plan_client_id` + `azure_apply_client_id` (apply) | `azure/login` plus `ARM_USE_OIDC`, so the azurerm and azuread providers and the azurerm backend use the federated token |
 
 Each auth step self-skips when its inputs are empty, so a caller passes only
 its own cloud's values.
@@ -244,6 +244,36 @@ jobs:
       check_only: true
 ```
 
+### Azure identities for the gated apply
+
+Azure has no role chaining, so the plan/apply split is two identities (user-assigned
+managed identities or app registrations), each with its own federated credential:
+
+| Identity | Federated credential subject | Role |
+|---|---|---|
+| plan | `repo:OWNER/REPO:pull_request` and `repo:OWNER/REPO:ref:refs/heads/main` | Reader on the target scope, Storage Blob Data Contributor on the state container (the plan takes a blob lease) |
+| apply | `repo:OWNER/REPO:environment:prod-apply` only | Write on the target scope |
+
+The apply identity trusts only the environment subject. A workflow edited to drop
+`environment:` gets a token whose subject is the branch, which that identity
+rejects, so the reviewer gate cannot be skipped by editing YAML. This is the same
+property the GCP path gets from conditioning the apply service account's WIF
+binding on the environment claim. The backend block needs `use_oidc = true` and
+`use_azuread_auth = true` (or rely on the `ARM_USE_OIDC` and `ARM_USE_AZUREAD`
+variables the workflows export).
+
+```yaml
+  apply:
+    uses: jordann6/platform-guardrails/.github/workflows/tf-apply.yml@<commit-sha> # v1.8.0
+    with:
+      terraform_dir: workload
+      environment: prod-apply
+      azure_plan_client_id:  ${{ vars.AZURE_PLAN_CLIENT_ID }}
+      azure_apply_client_id: ${{ vars.AZURE_APPLY_CLIENT_ID }}
+      azure_tenant_id:       ${{ vars.AZURE_TENANT_ID }}
+      azure_subscription_id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+```
+
 ### Roots that assume into other accounts (v1.7.0)
 
 A root whose provider does `assume_role` into a member account has a problem the
@@ -297,6 +327,46 @@ secrets, and log groups are deliberately excluded: they are the ~$1-3/mo standin
 footprint the design lets survive a destroy. Override the list per repo with
 `.guardrails/hourly-types.txt`.
 
+## Drift detection
+
+A gated apply proves the code and the cloud agreed at merge time. It says nothing
+about the console change made afterwards. `tf-drift.yml` runs
+`plan -refresh-only -detailed-exitcode` on a schedule: exit 2 means real
+infrastructure has moved away from state. `-refresh-only` keeps a merged PR that
+is still waiting on its apply from being reported as drift.
+
+On drift it opens one issue per root, labeled `drift`, listing each drifted
+resource and the attributes that changed (names only, never values, since a
+drifted value can be a secret; see `scripts/drift-summary.sh`). Later runs update
+that issue, and the first clean run closes it, so open `drift` issues are the
+current drift and nothing else. The run also fails unless `fail_on_drift: false`.
+
+It is read-only: it runs with `-lock=false` and never writes state, so a
+scheduled check cannot hold the lock against a real apply. Give it the read-scoped
+identity.
+
+```yaml
+# .github/workflows/drift.yml
+on:
+  schedule:
+    - cron: "17 6 * * *"   # daily
+  workflow_dispatch:
+permissions:
+  contents: read
+  id-token: write
+  issues: write
+jobs:
+  drift:
+    strategy:
+      matrix:
+        root: [terraform, observability]
+    uses: jordann6/platform-guardrails/.github/workflows/tf-drift.yml@<commit-sha> # v1.8.0
+    with:
+      guardrails_ref: <commit-sha>
+      terraform_dir: ${{ matrix.root }}
+      aws_role_arn: arn:aws:iam::111111111111:role/gha-plan
+```
+
 ## Handing outputs to application pipelines
 
 Application pipelines should never read Terraform state, and should not repeat
@@ -341,7 +411,9 @@ no policy, because it still looks green.
 
 ## What this deliberately does not do
 
-It does not auto-remediate, and it does not gate on cost. Infracost comments,
+It does not auto-remediate, and it does not gate on cost. Drift detection
+reports drift; it never reverts it, because the drifted value is sometimes the
+emergency fix that should be codified, not undone. Infracost comments,
 it does not block, because a threshold that fires on legitimate growth gets
 ignored within a month. The judgment stays with the reviewer; the tooling just
 makes sure the reviewer is looking at the right three lines.
