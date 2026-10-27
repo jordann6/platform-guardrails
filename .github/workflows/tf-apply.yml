@@ -35,6 +35,21 @@ on:
       terraform_version:
         type: string
         default: 1.11.3
+      build_command:
+        description: >-
+          Shell command run from terraform_dir before any cloud login, for roots that
+          package local artifacts Terraform reads at plan time (a Lambda with pip
+          dependencies, say). It carries the same trust as the Terraform it builds
+          for. Empty skips it.
+        type: string
+        default: ""
+      build_dir:
+        description: >-
+          Directory under terraform_dir that build_command writes. It travels with the
+          saved plan, so the apply job replays the plan against the exact files that
+          were planned instead of rebuilding them. Used only when build_command is set.
+        type: string
+        default: build
       environment:
         description: GitHub environment gating the apply (must have a required reviewer).
         type: string
@@ -138,9 +153,14 @@ jobs:
         id: artifact
         env:
           DIR: ${{ inputs.terraform_dir }}
+          BUILD_COMMAND: ${{ inputs.build_command }}
+          BUILD_DIR: ${{ inputs.build_dir }}
         run: |
           name="tfplan-$(printf '%s' "$DIR" | tr -c 'A-Za-z0-9._-' '-')"
           echo "name=${name}" >> "$GITHUB_OUTPUT"
+          if [ -n "$BUILD_COMMAND" ]; then
+            echo "build_path=${DIR}/${BUILD_DIR}" >> "$GITHUB_OUTPUT"
+          fi
 
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
 
@@ -150,6 +170,15 @@ jobs:
           repository: jordann6/platform-guardrails
           ref: ${{ inputs.guardrails_ref }}
           path: .guardrails-src
+
+      # Before any cloud login: a build needs the network, not credentials. The
+      # command arrives through the environment, never interpolated into the script.
+      - name: Build local artifacts
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.terraform_dir }}
+        env:
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: bash -euo pipefail -c "$BUILD_COMMAND"
 
       - name: Configure AWS credentials (OIDC, read-scoped)
         if: inputs.plan_role_arn != ''
@@ -247,7 +276,9 @@ jobs:
           fi
 
       # The binary plan is what apply consumes, so the reviewer approves exactly
-      # what runs. plan.json rides along for the record.
+      # what runs. plan.json rides along for the record. Built artifacts ride
+      # along too: a saved plan does not re-read data sources, so an archive made
+      # during plan would not exist on the apply runner otherwise.
       - name: Upload plan
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
@@ -255,6 +286,7 @@ jobs:
           path: |
             ${{ inputs.terraform_dir }}/tfplan
             ${{ inputs.terraform_dir }}/plan.json
+            ${{ steps.artifact.outputs.build_path }}
           retention-days: 1
           if-no-files-found: error
 
