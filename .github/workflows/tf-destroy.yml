@@ -33,6 +33,14 @@ on:
       terraform_version:
         type: string
         default: 1.11.3
+      build_command:
+        description: >-
+          Shell command run from terraform_dir before any cloud login, for roots that
+          package local artifacts Terraform reads at plan time (a Lambda with pip
+          dependencies, say). It carries the same trust as the Terraform it builds
+          for. Empty skips it.
+        type: string
+        default: ""
       environment:
         description: GitHub environment gating the destroy (required reviewer recommended).
         type: string
@@ -97,6 +105,15 @@ jobs:
           repository: jordann6/platform-guardrails
           ref: ${{ inputs.guardrails_ref }}
           path: .guardrails-src
+
+      # Before any cloud login: a build needs the network, not credentials. The
+      # command arrives through the environment, never interpolated into the script.
+      - name: Build local artifacts
+        if: inputs.build_command != ''
+        working-directory: ${{ inputs.terraform_dir }}
+        env:
+          BUILD_COMMAND: ${{ inputs.build_command }}
+        run: bash -euo pipefail -c "$BUILD_COMMAND"
 
       - name: Configure AWS credentials (OIDC)
         if: inputs.aws_role_arn != ''

@@ -333,6 +333,28 @@ apply can assert `has_changes == 'false'`, which catches a perpetual diff the da
 it is introduced. `tf-apply.yml` also takes `skip_apply_when_unchanged: true`, so an
 empty plan does not page a reviewer to approve a no-op.
 
+### Roots that build what they deploy (v1.9.0)
+
+A root that zips a Lambda with `archive_file` has two problems in CI. A checkout has
+no installed dependencies to zip, and a saved plan does not re-read data sources, so
+the archive made during plan never exists on the apply runner. `tf-plan.yml`,
+`tf-apply.yml`, `tf-destroy.yml` and `tf-drift.yml` take `build_command`, run from
+`terraform_dir` before any cloud login:
+
+```yaml
+    with:
+      terraform_dir: workload
+      build_command: ./rotation/build.sh   # writes workload/build/
+```
+
+`tf-apply.yml` uploads `build_dir` (default `build`, under `terraform_dir`) with the
+saved plan and restores it in the gated job, so the apply replays against the exact
+files the reviewer's plan hashed. Make the build reproducible (pinned and hashed
+dependencies, no bytecode): the post-apply re-plan runs on a fresh runner, and a
+build that differs shows up there as a perpetual diff. Pass the same command to
+every workflow that plans the root, destroy and drift included, or their plans fail
+to read the archive.
+
 What counts as "hourly" is `scripts/hourly-guard.sh`: NAT gateways, managed
 firewalls, VPC/private endpoints, managed databases, k8s control planes, load
 balancers, VMs, and their Azure/GCP equivalents. KMS keys, empty backup vaults,
