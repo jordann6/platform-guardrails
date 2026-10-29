@@ -7,9 +7,9 @@ name: Terraform Drift Detection (scheduled)
 # rewrote. Those only show up at the next plan, if anyone runs one.
 #
 #   plan -refresh-only -detailed-exitcode
-#     0  no drift
-#     2  real infrastructure differs from state (drift)
-#     1  error
+#     1  error (the run fails)
+#     0 or 2  the plan ran; drift is then read from the plan JSON's
+#             resource_drift, not from the exit code (see the step comment)
 #
 # -refresh-only isolates out-of-band changes from unapplied code: a merged PR
 # waiting on its apply is not drift, and this does not report it as drift.
@@ -183,11 +183,22 @@ jobs:
           code=$?
           set -e
           case "$code" in
-            0) echo "drifted=false" >> "$GITHUB_OUTPUT" ;;
-            2) echo "drifted=true" >> "$GITHUB_OUTPUT" ;;
+            0 | 2) ;;
             *) exit "$code" ;;
           esac
           terraform -chdir="$DIR" show -json drift.tfplan > /tmp/drift.json
+          # Exit code 2 is not the drift signal. On a refresh-only plan it means
+          # "applyable", and Terraform also sets that for state differences it
+          # does not report as drift: an azurerm root fresh from a no-op apply
+          # returned 2 with an empty resource_drift and identical attributes.
+          # Drift is what resource_drift lists, the same list the issue reports.
+          count=$(jq '[.resource_drift[]? | select(.change.actions != ["no-op"])] | length' /tmp/drift.json)
+          echo "terraform exit ${code}, ${count} drifted resource(s)"
+          if [ "$count" -gt 0 ]; then
+            echo "drifted=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "drifted=false" >> "$GITHUB_OUTPUT"
+          fi
 
       # scripts/drift-summary.sh names the attributes that changed rather than
       # dumping values, which can include secrets.
