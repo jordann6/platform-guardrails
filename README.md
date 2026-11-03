@@ -458,6 +458,14 @@ requests while the second keeps serving. No cloud account is involved.
 Registries: `ghcr` (default, no setup) or `ecr` (`ecr_registry` plus an
 `aws_role_arn` assumed through OIDC).
 
+**A persistent local target:** `k8s/home/up.sh` creates a k3d cluster named
+`home` with Flux, the delivery platform and a GHCR pull credential, and
+`k8s/home/add-app.sh <repo-dir>` points it at an app wired by `install.sh --app`.
+k3d restarts with Docker, so with Docker Desktop set to start at login the
+cluster is always there, and deliveries published while the Mac sleeps land
+when it wakes. The app template includes a small synthetic-traffic client,
+because an app without traffic gives the canary analysis nothing to judge.
+
 ## Handing outputs to application pipelines
 
 Application pipelines should never read Terraform state, and should not repeat

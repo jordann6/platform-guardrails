@@ -175,10 +175,12 @@ Done. Remaining steps for $APP:
      resources. The app must export OpenTelemetry HTTP server metrics; the
      template already sets OTEL_SERVICE_NAME, OTEL_RESOURCE_ATTRIBUTES
      (service.version) and the collector endpoint. No metrics, no release.
-  3. Once per cluster: install Flux, then the delivery platform:
-       kubectl apply --server-side -k $SRC/k8s/delivery-platform   # run twice
-  4. Once per cluster for this app: kubectl apply -f $TARGET/deploy/flux.yaml
-     (GHCR packages are private by default: see the secretRef note in it).
+  3. Point deploy/app/synthetic-traffic.yaml at a real route of the app (it
+     gives the canary analysis requests to judge when there are no users).
+  4. Local home cluster: $SRC/k8s/home/up.sh (once), then
+       $SRC/k8s/home/add-app.sh $TARGET
+     Any other cluster: install Flux, apply k8s/delivery-platform server-side
+     (twice), then kubectl apply -f $TARGET/deploy/flux.yaml.
   5. Merge to main. The Release workflow builds, scans, publishes, attests and
      delivers; Flux applies it and the canary analysis decides.
 EOF

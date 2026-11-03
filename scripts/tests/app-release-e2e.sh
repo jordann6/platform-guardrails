@@ -8,7 +8,9 @@
 #   1. the delivered version goes live (first release, no canary),
 #   2. a second version canaries through the http-canary analysis to Healthy,
 #   3. a degraded version (30% injected 500s) is aborted by the analysis and only
-#      the previous version keeps serving.
+#      the previous version keeps serving,
+#   4. a good version rolls forward from the abort, so the highest version in the
+#      registry is always a healthy one.
 #
 # Env: IMAGE (repo@sha256:...), DEPLOY_REPO (registry/app-deploy), VERSION
 # (MAJOR.MINOR.PATCH delivered by the workflow), REGISTRY_USER, REGISTRY_TOKEN.
@@ -104,32 +106,14 @@ wait_phase Healthy 300 || fail "version $VERSION did not become Healthy"
 echo "Healthy, serving $VERSION"
 done_
 
-say "Synthetic traffic"
-kubectl -n "$ns" apply -f - >/dev/null <<YAML
-apiVersion: apps/v1
-kind: Deployment
-metadata:
-  name: load
-spec:
-  replicas: 1
-  selector: {matchLabels: {app: load}}
-  template:
-    metadata: {labels: {app: load}}
-    spec:
-      automountServiceAccountToken: false
-      securityContext: {runAsNonRoot: true, runAsUser: 100, seccompProfile: {type: RuntimeDefault}}
-      containers:
-        - name: load
-          image: curlimages/curl@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40
-          command: ["sh", "-c", "while true; do curl -s -o /dev/null -m 2 http://$app/work; sleep 0.1; done"]
-          securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: [ALL]}}
-YAML
-kubectl -n "$ns" rollout status deploy/load --timeout=120s >/dev/null
+say "Synthetic traffic (from the deploy template)"
+kubectl -n "$ns" rollout status "deploy/$app-synthetic" --timeout=120s
 done_
 
 IFS=. read -r major minor patch <<<"$VERSION"
 good="$major.$minor.$((patch * 100 + 1))"
 bad="$major.$minor.$((patch * 100 + 2))"
+fix="$major.$minor.$((patch * 100 + 3))"
 
 say "2. Version $good canaries through analysis"
 deliver "$good"
@@ -153,6 +137,17 @@ sleep 15
 echo "Aborted; only $good serving"
 done_
 
+# Leave the registry's highest version healthy: a cluster that starts following
+# this artifact later must not begin with the degraded build. This is also the
+# recovery path: a fix (or a rollback) ships as a higher version.
+say "4. Version $fix rolls forward from the aborted release"
+deliver "$fix"
+sleep 10
+wait_phase Healthy 480 || fail "fix $fix did not become Healthy after the abort"
+[[ "$(serving_versions)" == "$fix" ]] || fail "expected $fix serving, got $(serving_versions)"
+echo "Healthy, serving $fix"
+done_
+
 {
 	echo "### app-release end to end"
 	echo "| Step | Result |"
@@ -160,5 +155,6 @@ done_
 	echo "| $VERSION delivered by app-release.yml | Healthy |"
 	echo "| $good canary with analysis | Healthy, analysis Successful |"
 	echo "| $bad with 30% injected errors | Aborted by analysis, $good kept serving |"
+	echo "| $fix after the abort | Healthy |"
 } >>"${GITHUB_STEP_SUMMARY:-/dev/stdout}"
 echo "app-release-e2e: all checks passed"
