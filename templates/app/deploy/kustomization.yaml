@@ -1,0 +1,11 @@
+# App release template for app-release.yml. The workflow appends the image digest
+# and the release annotations (app-release/version, app-release/commit) to a copy of
+# this file at release time: do not set images or commonAnnotations here.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - rollout.yaml
+  - service.yaml
+  - pdb.yaml
+configurations:
+  - rollout-transform.yaml

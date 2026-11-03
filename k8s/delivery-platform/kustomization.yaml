@@ -1,0 +1,24 @@
+# Delivery platform: the cluster-wide pieces app-release.yml relies on, with no
+# application names in them. Install once per cluster:
+#
+#   kubectl apply --server-side -k k8s/delivery-platform   # twice: the second pass
+#                                                           # creates the template once
+#                                                           # the CRDs are established
+#
+# Server-side apply is required: the Argo Rollouts CRDs exceed the client-side
+# last-applied annotation limit. Contents: OpenTelemetry Collector, Prometheus
+# (OTLP receiver, service.name and service.version as labels), Argo Rollouts, and
+# the http-canary ClusterAnalysisTemplate.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - monitoring.yaml
+  - argo-rollouts
+  - analysis.yaml
+images:
+  - name: otel-collector
+    newName: otel/opentelemetry-collector
+    digest: sha256:28b6d41ac51bff6b41ba5e8fe503569ffb9d6a1ea90f7a78419e86f34e44f750 # 0.164.0
+  - name: prometheus
+    newName: prom/prometheus
+    digest: sha256:fa3302279710be2f21a8301ec17a8b4f2301fd829bd113839b3b6b02b6f191a2 # v3.15.1

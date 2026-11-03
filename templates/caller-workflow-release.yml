@@ -1,0 +1,41 @@
+name: Release
+
+# Builds, scans and (on main) publishes, attests and delivers __APP__ through the
+# shared app-release workflow. Pull requests build and scan only. To roll back,
+# run this workflow manually with the last good image digest: it delivers a
+# higher version with that image.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      image_digest:
+        description: Roll back to this published digest (sha256:...). Empty builds main.
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: jordann6/platform-guardrails/.github/workflows/app-release.yml@__REF__ # __REF_LABEL__
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      app_name: __APP__
+      context: "."
+      dockerfile: Dockerfile
+      deploy_dir: deploy/app
+      registry: ghcr
+      publish: ${{ github.event_name != 'pull_request' }}
+      image_digest: ${{ inputs.image_digest || '' }}
+      guardrails_ref: __REF__

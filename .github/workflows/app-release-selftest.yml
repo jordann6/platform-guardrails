@@ -1,0 +1,82 @@
+name: App release self-test
+
+# Proves app-release.yml end to end with no cloud account: the real workflow builds,
+# scans, publishes, attests and delivers examples/app to GHCR, then a kind cluster
+# with Flux and k8s/delivery-platform pulls it, canaries a second version through
+# the analysis, and aborts a degraded third version (scripts/tests/app-release-e2e.sh).
+on:
+  pull_request:
+    paths:
+      - .github/workflows/app-release*.yml
+      - examples/app/**
+      - k8s/**
+      - templates/app/**
+      - scripts/render-release.sh
+      - scripts/tests/app-release-e2e.sh
+  push:
+    branches: [main]
+    paths:
+      - .github/workflows/app-release*.yml
+      - examples/app/**
+      - k8s/**
+      - templates/app/**
+      - scripts/render-release.sh
+      - scripts/tests/app-release-e2e.sh
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: app-release-selftest
+  cancel-in-progress: false
+
+jobs:
+  release:
+    uses: ./.github/workflows/app-release.yml
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    with:
+      app_name: example-app
+      context: examples/app
+      dockerfile: examples/app/Dockerfile
+      deploy_dir: examples/app/deploy
+      registry: ghcr
+      publish: true
+      guardrails_ref: ${{ github.event.pull_request.head.sha || github.sha }}
+
+  e2e:
+    name: End to end on kind
+    needs: release
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Install kind and the Flux CLI (pinned, checksums verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/kind" https://github.com/kubernetes-sigs/kind/releases/download/v0.33.0/kind-linux-amd64
+          echo "aee6151561422756b764a4ae28e7f44cda5af5a9eead3cc9985112b1de8d8e0d  $RUNNER_TEMP/kind" | sha256sum --check --strict
+          sudo install -m 0755 "$RUNNER_TEMP/kind" /usr/local/bin/kind
+          curl -sSfL -o "$RUNNER_TEMP/flux.tgz" https://github.com/fluxcd/flux2/releases/download/v2.9.6/flux_2.9.6_linux_amd64.tar.gz
+          echo "b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5  $RUNNER_TEMP/flux.tgz" | sha256sum --check --strict
+          sudo tar -xzf "$RUNNER_TEMP/flux.tgz" -C /usr/local/bin flux
+      - run: kind create cluster --wait 120s
+      - name: Prove delivery, canary and abort
+        env:
+          IMAGE: ${{ needs.release.outputs.image }}
+          VERSION_ARTIFACT: ${{ needs.release.outputs.deploy_artifact }}
+          REGISTRY_USER: ${{ github.actor }}
+          REGISTRY_TOKEN: ${{ github.token }}
+        run: |
+          # oci://<deploy-repo>:<version>
+          ref="${VERSION_ARTIFACT#oci://}"
+          export DEPLOY_REPO="${ref%:*}" VERSION="${ref##*:}"
+          scripts/tests/app-release-e2e.sh

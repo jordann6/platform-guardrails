@@ -1,0 +1,6 @@
+# Kustomize does not know the Rollout kind: this puts the release annotations on
+# its pod template, where the app reads its version. Image digests need no entry.
+commonAnnotations:
+  - path: spec/template/metadata/annotations
+    create: true
+    kind: Rollout

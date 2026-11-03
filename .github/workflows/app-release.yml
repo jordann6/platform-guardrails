@@ -1,0 +1,304 @@
+name: App release (reusable)
+
+# Build once, gate it, publish exactly what was scanned, attest it, and hand the
+# cluster a versioned deploy artifact. Flux pulls the artifact; Argo Rollouts and
+# the http-canary analysis (k8s/delivery-platform) decide whether it goes live.
+# The runner never talks to a cluster.
+#
+#   build-scan  OCI archive build, blocking Trivy scan, CycloneDX SBOM. No credentials.
+#   publish     Push the scanned archive unchanged, verify the digest, attach
+#               provenance and SBOM attestations in the registry.
+#   deliver     Render deploy_dir with the image pinned by digest and the release
+#               version, push it as oci://<registry>/<app>-deploy:<version>.
+#
+# Every run that delivers gets a new version (1.<run_number>.<run_attempt>), so a
+# change to the manifests alone ships like any other. Rollback: re-run an older
+# successful run's deliver job, or dispatch with image_digest set to the last good
+# digest; either publishes a higher version with the old content.
+#
+# Caller permissions: contents: read, packages: write (ghcr), id-token: write,
+# attestations: write.
+
+on:
+  workflow_call:
+    inputs:
+      app_name:
+        description: Image and deploy artifact name. Lowercase.
+        type: string
+        required: true
+      context:
+        description: Docker build context.
+        type: string
+        default: "."
+      dockerfile:
+        description: Dockerfile path, relative to the repository root.
+        type: string
+        default: Dockerfile
+      platform:
+        description: Target platform of the image.
+        type: string
+        default: linux/amd64
+      deploy_dir:
+        description: Kustomize directory rendered for each release (see templates/app/deploy).
+        type: string
+        default: deploy/app
+      registry:
+        description: "ghcr or ecr."
+        type: string
+        default: ghcr
+      ecr_registry:
+        description: "ECR registry host (<account>.dkr.ecr.<region>.amazonaws.com). Required for ecr."
+        type: string
+        default: ""
+      aws_role_arn:
+        description: Role assumed by publish and deliver through OIDC. Required for ecr.
+        type: string
+        default: ""
+      aws_region:
+        description: AWS region of the ECR registry.
+        type: string
+        default: us-east-1
+      publish:
+        description: Publish and deliver. False builds and scans only (pull requests).
+        type: boolean
+        default: true
+      image_digest:
+        description: Skip the build and deliver this already-published digest (rollback).
+        type: string
+        default: ""
+      guardrails_ref:
+        description: Commit of platform-guardrails the caller pins in uses:, for the render script. Full SHA.
+        type: string
+        required: true
+    outputs:
+      image:
+        description: Published image, repo@sha256:digest.
+        value: ${{ jobs.publish.outputs.image }}
+      deploy_artifact:
+        description: Delivered artifact, oci://repo:version.
+        value: ${{ jobs.deliver.outputs.artifact }}
+
+permissions:
+  contents: read
+
+jobs:
+  names:
+    name: Resolve names
+    runs-on: ubuntu-24.04
+    outputs:
+      image_repo: ${{ steps.n.outputs.image_repo }}
+      deploy_repo: ${{ steps.n.outputs.deploy_repo }}
+      version: ${{ steps.n.outputs.version }}
+    steps:
+      - id: n
+        env:
+          APP: ${{ inputs.app_name }}
+          REGISTRY: ${{ inputs.registry }}
+          ECR: ${{ inputs.ecr_registry }}
+          ROLE: ${{ inputs.aws_role_arn }}
+          OWNER: ${{ github.repository_owner }}
+          DIGEST: ${{ inputs.image_digest }}
+        run: |
+          [[ "$APP" =~ ^[a-z0-9][a-z0-9._-]*$ ]] || { echo "::error::app_name must be lowercase: '$APP'"; exit 1; }
+          if [ -n "$DIGEST" ] && ! [[ "$DIGEST" =~ ^sha256:[0-9a-f]{64}$ ]]; then
+            echo "::error::image_digest must be sha256:<64 hex>"; exit 1
+          fi
+          case "$REGISTRY" in
+            ghcr) host="ghcr.io/${OWNER,,}" ;;
+            ecr)
+              [ -n "$ECR" ] && [ -n "$ROLE" ] || { echo "::error::ecr needs ecr_registry and aws_role_arn"; exit 1; }
+              host="$ECR" ;;
+            *) echo "::error::registry must be ghcr or ecr, got '$REGISTRY'"; exit 1 ;;
+          esac
+          {
+            echo "image_repo=$host/$APP"
+            echo "deploy_repo=$host/$APP-deploy"
+            echo "version=1.$GITHUB_RUN_NUMBER.$GITHUB_RUN_ATTEMPT"
+          } >> "$GITHUB_OUTPUT"
+
+  build-scan:
+    name: Build and scan
+    needs: names
+    if: inputs.image_digest == ''
+    runs-on: ubuntu-24.04
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Install Trivy and Syft (pinned, checksums verified)
+        run: |
+          set -euo pipefail
+          install() { # name url sha256
+            curl -sSfL -o "$RUNNER_TEMP/$1.tgz" "$2"
+            echo "$3  $RUNNER_TEMP/$1.tgz" | sha256sum --check --strict
+            sudo tar -xzf "$RUNNER_TEMP/$1.tgz" -C /usr/local/bin "$1"
+          }
+          install trivy https://github.com/aquasecurity/trivy/releases/download/v0.76.0/trivy_0.76.0_Linux-64bit.tar.gz e24b1c51293c1b15e4ba8d45bbc7891ba053f90278ec2698f3562c993e145fe7
+          install syft https://github.com/anchore/syft/releases/download/v1.54.1/syft_1.54.1_linux_amd64.tar.gz c069905b391cc4c20a5ba65ad5c10be2a7ba074f8ea6ad203e24d14e303dad47
+      - name: Build the image as an OCI archive
+        id: build
+        env:
+          CONTEXT: ${{ inputs.context }}
+          DOCKERFILE: ${{ inputs.dockerfile }}
+          PLATFORM: ${{ inputs.platform }}
+        run: |
+          docker buildx build --platform "$PLATFORM" --file "$DOCKERFILE" \
+            --provenance=false --sbom=false \
+            --label "org.opencontainers.image.source=$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" \
+            --label "org.opencontainers.image.revision=$GITHUB_SHA" \
+            --output type=oci,dest=image.tar --metadata-file build.json "$CONTEXT"
+          digest="$(jq -r '."containerimage.digest"' build.json)"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
+          echo "Image digest: \`$digest\`" >> "$GITHUB_STEP_SUMMARY"
+      - name: Scan (blocking on fixable HIGH and CRITICAL)
+        run: |
+          mkdir -p oci-layout && tar -xf image.tar -C oci-layout
+          trivy image --quiet --input oci-layout --scanners vuln --severity HIGH,CRITICAL \
+            --ignore-unfixed --exit-code 1 --format json --output trivy.json
+          trivy convert --format table trivy.json
+      - name: SBOM
+        run: syft scan oci-archive:image.tar --output cyclonedx-json=sbom.cdx.json
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image
+          path: image.tar
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: scan-and-sbom
+          path: |
+            trivy.json
+            sbom.cdx.json
+          retention-days: 90
+
+  publish:
+    name: Publish and attest
+    needs: [names, build-scan]
+    if: inputs.publish && inputs.image_digest == ''
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    outputs:
+      image: ${{ steps.push.outputs.image }}
+    steps:
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: inputs.registry == 'ecr'
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+      - name: Registry login
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          ECR: ${{ inputs.ecr_registry }}
+          TOKEN: ${{ github.token }}
+        run: |
+          if [ "$REGISTRY" = ghcr ]; then
+            echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          else
+            aws ecr get-login-password | docker login "$ECR" -u AWS --password-stdin
+          fi
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: image
+      - name: Push the scanned archive unchanged
+        id: push
+        env:
+          REPO: ${{ needs.names.outputs.image_repo }}
+          DIGEST: ${{ needs.build-scan.outputs.digest }}
+        run: |
+          skopeo copy --preserve-digests --authfile "$HOME/.docker/config.json" \
+            oci-archive:image.tar "docker://$REPO:$GITHUB_SHA"
+          pushed="$(skopeo inspect --authfile "$HOME/.docker/config.json" --format '{{.Digest}}' "docker://$REPO:$GITHUB_SHA")"
+          if [ "$pushed" != "$DIGEST" ]; then
+            echo "::error::Pushed digest $pushed differs from the scanned digest $DIGEST"; exit 1
+          fi
+          echo "image=$REPO@$DIGEST" >> "$GITHUB_OUTPUT"
+          echo "Published \`$REPO@$DIGEST\`" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+        with:
+          name: scan-and-sbom
+      - uses: actions/attest-build-provenance@96278af6caaf10aea03fd8d33a09a777ca52d62f # v3.2.0
+        with:
+          subject-name: ${{ needs.names.outputs.image_repo }}
+          subject-digest: ${{ needs.build-scan.outputs.digest }}
+          push-to-registry: true
+      - uses: actions/attest-sbom@4651f806c01d8637787e274ac3bdf724ef169f34 # v3.0.0
+        with:
+          subject-name: ${{ needs.names.outputs.image_repo }}
+          subject-digest: ${{ needs.build-scan.outputs.digest }}
+          sbom-path: sbom.cdx.json
+          push-to-registry: true
+
+  deliver:
+    name: Deliver
+    needs: [names, build-scan, publish]
+    # Runs after a publish, or alone for a rollback to an already-published digest.
+    if: >-
+      always() && inputs.publish &&
+      needs.names.result == 'success' &&
+      (needs.publish.result == 'success' || (inputs.image_digest != '' && needs.publish.result == 'skipped'))
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+    outputs:
+      artifact: ${{ steps.push.outputs.artifact }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false
+      - name: Fetch the render script
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: jordann6/platform-guardrails
+          ref: ${{ inputs.guardrails_ref }}
+          path: .guardrails-src
+          persist-credentials: false
+      - uses: aws-actions/configure-aws-credentials@e1253824e5c10ff9df46874f81ed3ec929e19cfd # v6.3.0
+        if: inputs.registry == 'ecr'
+        with:
+          role-to-assume: ${{ inputs.aws_role_arn }}
+          aws-region: ${{ inputs.aws_region }}
+      - name: Install Flux CLI (pinned, checksum verified)
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/flux.tgz" https://github.com/fluxcd/flux2/releases/download/v2.9.6/flux_2.9.6_linux_amd64.tar.gz
+          echo "b4d22673e9246cbd628881f1a9ef3b090085dced291e42d804555cee8e8d42c5  $RUNNER_TEMP/flux.tgz" | sha256sum --check --strict
+          sudo tar -xzf "$RUNNER_TEMP/flux.tgz" -C /usr/local/bin flux
+      - name: Registry login
+        env:
+          REGISTRY: ${{ inputs.registry }}
+          ECR: ${{ inputs.ecr_registry }}
+          TOKEN: ${{ github.token }}
+        run: |
+          if [ "$REGISTRY" = ghcr ]; then
+            echo "$TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          else
+            aws ecr get-login-password | docker login "$ECR" -u AWS --password-stdin
+          fi
+      - name: Render and push the deploy artifact
+        id: push
+        env:
+          APP: ${{ inputs.app_name }}
+          DEPLOY_DIR: ${{ inputs.deploy_dir }}
+          IMAGE_REPO: ${{ needs.names.outputs.image_repo }}
+          DEPLOY_REPO: ${{ needs.names.outputs.deploy_repo }}
+          VERSION: ${{ needs.names.outputs.version }}
+          DIGEST: ${{ inputs.image_digest || needs.build-scan.outputs.digest }}
+        run: |
+          .guardrails-src/scripts/render-release.sh "$DEPLOY_DIR" "$RUNNER_TEMP/rendered" \
+            "$APP" "$IMAGE_REPO@$DIGEST" "$VERSION" "$GITHUB_SHA"
+          flux push artifact "oci://$DEPLOY_REPO:$VERSION" --path "$RUNNER_TEMP/rendered" \
+            --source "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY" --revision "$GITHUB_REF_NAME@sha1:$GITHUB_SHA"
+          echo "artifact=oci://$DEPLOY_REPO:$VERSION" >> "$GITHUB_OUTPUT"
+          {
+            echo "Delivered \`oci://$DEPLOY_REPO:$VERSION\` for \`$IMAGE_REPO@$DIGEST\`."
+            echo "Flux applies it on its next poll; the canary analysis decides whether it goes live."
+          } >> "$GITHUB_STEP_SUMMARY"
