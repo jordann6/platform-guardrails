@@ -1,0 +1,50 @@
+# Synthetic traffic: canary analysis judges a release by its own requests, and an
+# app with no users has none, so every release would abort. This client calls
+# SYNTHETIC_PATH about five times a second. Point it at a cheap route that
+# exercises the app (not a health probe), or delete this file and its line in
+# kustomization.yaml once the app has real traffic.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: APP_NAME-synthetic
+  labels:
+    app.kubernetes.io/name: APP_NAME-synthetic
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: APP_NAME-synthetic
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: APP_NAME-synthetic
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 100
+        runAsGroup: 101
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: client
+          image: curlimages/curl@sha256:935d9100e9ba842cdb060de42472c7ca90cfe9a7c96e4dacb55e79e560b3ff40 # 8.17.0
+          command:
+            - /bin/sh
+            - -c
+            - while true; do curl -s -o /dev/null -m 2 "http://APP_NAME$SYNTHETIC_PATH"; sleep 0.2; done
+          env:
+            - name: SYNTHETIC_PATH
+              value: /
+          resources:
+            requests:
+              cpu: 10m
+              memory: 16Mi
+            limits:
+              cpu: 100m
+              memory: 32Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]

@@ -7,5 +7,6 @@ resources:
   - rollout.yaml
   - service.yaml
   - pdb.yaml
+  - synthetic-traffic.yaml
 configurations:
   - rollout-transform.yaml
