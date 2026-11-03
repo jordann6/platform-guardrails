@@ -125,20 +125,18 @@ jobs:
             --github-token "${{ github.token }}" \
             --behavior update
 
+      - name: Fetch gate script
+        if: ${{ inputs.fail_on_cost }}
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          repository: jordann6/platform-guardrails
+          ref: ${{ inputs.guardrails_ref }}
+          path: .guardrails-src
+
+      # Fails closed: a missing or unpriced estimate is a failure, never $0, and
+      # the cost-approved label does not override it (scripts/cost-gate.sh).
       - name: Enforce threshold
         if: ${{ inputs.fail_on_cost }}
         env:
           APPROVED: ${{ contains(github.event.pull_request.labels.*.name, 'cost-approved') }}
-        run: |
-          delta=$(jq -r '.diffTotalMonthlyCost // "0"' /tmp/diff.json)
-          limit="${{ inputs.max_monthly_increase }}"
-          over=$(awk -v d="$delta" -v l="$limit" 'BEGIN { print (d > l) ? 1 : 0 }')
-          printf 'Projected monthly change: $%s (limit: $%s)\n' "$delta" "$limit"
-          if [ "$over" -eq 1 ]; then
-            if [ "$APPROVED" = "true" ]; then
-              echo "::notice::Over the \$$limit/mo gate, but 'cost-approved' label is present. Passing."
-              exit 0
-            fi
-            echo "::error::This PR adds \$$delta/mo, above the \$$limit/mo gate. Justify and add the 'cost-approved' label to override."
-            exit 1
-          fi
+        run: .guardrails-src/scripts/cost-gate.sh /tmp/diff.json "${{ inputs.max_monthly_increase }}"

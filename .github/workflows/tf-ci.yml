@@ -112,7 +112,8 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
       - name: Run Checkov
         run: |
-          pip install --quiet checkov
+          # Pinned: an unpinned scanner changes what the gate enforces without a commit here.
+          pip install --quiet checkov==3.4.3
           args=(--directory "${{ inputs.terraform_dir }}" --framework terraform --quiet --compact)
           if [ -n "${{ inputs.checkov_baseline }}" ]; then
             args+=(--baseline "${{ inputs.checkov_baseline }}")
