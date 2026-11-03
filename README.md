@@ -2,7 +2,9 @@
 
 Reusable CI gates for the portfolio fleet. Two callable workflows cover any
 stack: `ci.yml` for general repos (auto-detects Terraform, Python, Docker, Node,
-Go) and `tf-ci.yml` for Terraform-only repos with stricter gates.
+Go) and `tf-ci.yml` for Terraform-only repos with stricter gates. Applications
+deploy through `app-release.yml`: build once, scan, attest, and canary into a
+cluster through Flux and Argo Rollouts (see "Delivering applications").
 
 The problem this solves: infrastructure code that applies cleanly and does the
 wrong thing permanently. A wide-open security group, a log group that bills
@@ -409,6 +411,52 @@ jobs:
     secrets:
       TF_VARS: ${{ secrets.DRIFT_TFVARS }}   # only if the roots have required variables
 ```
+
+## Delivering applications (app-release.yml)
+
+`app-release.yml` is the application half: build once, gate it, publish exactly
+what was scanned, attest it, and hand the cluster a versioned deploy artifact. The
+runner never talks to a cluster. Flux pulls the artifact, and Argo Rollouts with an
+automated analysis decides whether the new version goes live.
+
+| Job | What it does |
+|---|---|
+| build-scan | OCI archive build, blocking Trivy scan (fixable HIGH and CRITICAL), CycloneDX SBOM. No credentials. |
+| publish | Pushes the scanned archive unchanged, fails if the registry digest differs, attaches build provenance and SBOM attestations in the registry. |
+| deliver | Renders the app's kustomize directory with the image pinned by digest and the release version (`scripts/render-release.sh`), pushes it as `oci://<registry>/<app>-deploy:1.<run>.<attempt>`. |
+
+Every delivery gets a new version, so a change to the manifests alone ships like
+any other. Rollback: dispatch the caller's Release workflow with the last good
+`image_digest`; it delivers a higher version with that image.
+
+**Wire a new app in one command:**
+
+```bash
+./install.sh --app my-service /path/to/my-service
+```
+
+This adds `.github/workflows/release.yml` (pull requests build and scan, `main`
+publishes and delivers), `deploy/app/` (a canary `Rollout`, Service and PDB with
+the restricted security context), and `deploy/flux.yaml` (the cluster side). The
+app must export OpenTelemetry HTTP server metrics. The template sets the service
+name, version and collector address, so any OpenTelemetry SDK picks them up.
+Without metrics, the analysis cannot pass and every release aborts: fail closed.
+
+**Once per cluster:** install Flux, then `kubectl apply --server-side -k k8s/delivery-platform`
+(run it twice: the first pass creates the CRDs). That installs an OpenTelemetry
+Collector, Prometheus, Argo Rollouts and the `http-canary` ClusterAnalysisTemplate:
+half the replicas move, the new version's own 5xx ratio (at most 1%) and p95
+latency (at most 0.5 s) are measured four times, and a failure aborts the Rollout
+while the stable version keeps serving. Then `kubectl apply -f deploy/flux.yaml`
+for each app.
+
+**Proof:** `app-release-selftest.yml` runs the real workflow against
+`examples/app` (Go), then on a kind cluster it delivers that version, canaries a
+second through the analysis to Healthy, and aborts a third that fails 30% of
+requests while the second keeps serving. No cloud account is involved.
+
+Registries: `ghcr` (default, no setup) or `ecr` (`ecr_registry` plus an
+`aws_role_arn` assumed through OIDC).
 
 ## Handing outputs to application pipelines
 

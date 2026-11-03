@@ -1,0 +1,102 @@
+# Canary release: half the replicas move to the new version, the http-canary
+# analysis judges that version's own error ratio and p95 latency, then the rest
+# follow. A failed analysis or a canary that cannot become available aborts the
+# Rollout and the stable version keeps serving.
+#
+# Adjust the port, probe path and resources for the app. The app must export
+# OpenTelemetry HTTP server metrics (http.server.request.duration); the env below
+# gives it the service name, version and collector address. With no metrics the
+# analysis cannot pass and every release aborts: fail closed.
+apiVersion: argoproj.io/v1alpha1
+kind: Rollout
+metadata:
+  name: APP_NAME
+  labels:
+    app.kubernetes.io/name: APP_NAME
+spec:
+  replicas: 2
+  revisionHistoryLimit: 5
+  progressDeadlineSeconds: 240
+  progressDeadlineAbort: true
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: APP_NAME
+  strategy:
+    canary:
+      maxSurge: 1
+      maxUnavailable: 0
+      steps:
+        - setWeight: 50
+        - analysis:
+            templates:
+              - templateName: http-canary
+                clusterScope: true
+            args:
+              - name: service-name
+                value: APP_NAME
+              - name: service-version
+                valueFrom:
+                  fieldRef:
+                    fieldPath: metadata.annotations['app-release/version']
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: APP_NAME
+    spec:
+      automountServiceAccountToken: false
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: app
+          image: APP_NAME
+          ports:
+            - name: http
+              containerPort: 8080
+          env:
+            - name: APP_VERSION
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.annotations['app-release/version']
+            - name: OTEL_SERVICE_NAME
+              value: APP_NAME
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: service.version=$(APP_VERSION)
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: http://otel-collector.monitoring.svc.cluster.local:4317
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          startupProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            periodSeconds: 5
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

@@ -1,0 +1,51 @@
+# Cluster side of an app delivered by app-release.yml. Apply once per cluster
+# (after k8s/delivery-platform), with kubectl apply -f. Flux follows the highest
+# 1.x deploy artifact the workflow publishes, applies it into APP_NAMESPACE, and
+# waits for the Rollout: Healthy passes, an aborted canary (Degraded) fails.
+#
+# Private registry: create a docker-registry Secret named APP_NAME-registry in
+# flux-system (for GHCR, a token with read:packages) and uncomment secretRef. The
+# app namespace needs the same Secret as an imagePullSecret for the pods.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: APP_NAMESPACE
+  labels:
+    pod-security.kubernetes.io/enforce: restricted
+---
+apiVersion: source.toolkit.fluxcd.io/v1
+kind: OCIRepository
+metadata:
+  name: APP_NAME
+  namespace: flux-system
+spec:
+  interval: 1m
+  url: oci://DEPLOY_REPOSITORY
+  ref:
+    semver: ">=1.0.0"
+  # secretRef:
+  #   name: APP_NAME-registry
+---
+apiVersion: kustomize.toolkit.fluxcd.io/v1
+kind: Kustomization
+metadata:
+  name: APP_NAME
+  namespace: flux-system
+spec:
+  interval: 5m
+  sourceRef:
+    kind: OCIRepository
+    name: APP_NAME
+  path: ./
+  targetNamespace: APP_NAMESPACE
+  prune: true
+  wait: true
+  # Longer than a full canary.
+  timeout: 8m
+  # Status must describe the current spec: right after a release is applied, it
+  # still describes the previous one, which may have aborted.
+  healthCheckExprs:
+    - apiVersion: argoproj.io/v1alpha1
+      kind: Rollout
+      current: status.phase == 'Healthy' && status.observedGeneration == string(metadata.generation)
+      failed: status.phase == 'Degraded' && status.observedGeneration == string(metadata.generation)
