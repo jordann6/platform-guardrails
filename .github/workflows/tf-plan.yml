@@ -66,6 +66,14 @@ on:
     secrets:
       INFRACOST_API_KEY:
         required: false
+      TF_VARS:
+        description: >-
+          Contents of a tfvars file for roots whose required variables live in a
+          gitignored terraform.tfvars. Written to the runner's temp dir, never the
+          checkout, and passed with -var-file. Empty for roots that need none.
+          Mark any personal values in it as sensitive in the root so the plan
+          output redacts them.
+        required: false
     outputs:
       has_changes:
         description: >-
@@ -166,10 +174,18 @@ jobs:
       # -detailed-exitcode: 0 is an empty plan, 2 is a plan with changes, 1 is an error.
       - name: Plan
         id: plan
+        env:
+          TF_VARS: ${{ secrets.TF_VARS }}
         run: |
           terraform -chdir=${{ inputs.terraform_dir }} init
+          var_file=()
+          if [ -n "$TF_VARS" ]; then
+            umask 077
+            printf '%s\n' "$TF_VARS" > "$RUNNER_TEMP/plan.tfvars"
+            var_file=(-var-file="$RUNNER_TEMP/plan.tfvars")
+          fi
           set +e
-          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false -detailed-exitcode
+          terraform -chdir=${{ inputs.terraform_dir }} plan -out=tfplan -input=false -detailed-exitcode "${var_file[@]}"
           code=$?
           set -e
           case "$code" in

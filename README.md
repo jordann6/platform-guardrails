@@ -364,6 +364,26 @@ secrets, and log groups are deliberately excluded: they are the ~$1-3/mo standin
 footprint the design lets survive a destroy. Override the list per repo with
 `.guardrails/hourly-types.txt`.
 
+### Roots with gitignored variables (v1.11.0)
+
+`tf-plan.yml` and `tf-apply.yml` take the same optional `TF_VARS` secret as
+`tf-drift.yml`, for roots whose required variables (an org email domain, an alert
+address) live in a gitignored `terraform.tfvars`. The plan job writes it to the
+runner's temp directory (mode 600, outside the checkout) and adds it with
+`-var-file`. The gated apply job never reads it: the saved plan already carries
+the values it was planned with.
+
+```yaml
+    with:
+      terraform_dir: accounts
+    secrets:
+      TF_VARS: ${{ secrets.ACCOUNTS_TFVARS }}
+```
+
+A plan prints variable values that reach resource attributes, and `tf-plan.yml`
+posts that plan to the pull request. Declare any personal value in the root as
+`sensitive = true` so the plan shows `(sensitive value)` instead.
+
 ## Drift detection
 
 A gated apply proves the code and the cloud agreed at merge time. It says nothing
